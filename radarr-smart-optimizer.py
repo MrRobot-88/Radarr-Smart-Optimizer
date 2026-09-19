@@ -25,25 +25,18 @@ from datetime import datetime, timezone
 # ============================================================
 
 # ============================================================
-# QUICK SETUP - most users only need to edit this block
+# QUICK SETUP
 # ============================================================
-# 1) Paste your Radarr API key below.
-# 2) Check the URL if Radarr is not on the same machine.
-# 3) Set how many interactive searches this script may do per run.
-# 4) IMPORTANT: review NORMAL_PROFILE_ID and UHD_PROFILE_ID below.
-#
-# Environment variables still work and override these values, which is
-# useful for Docker, cron and Synology Task Scheduler.
-RADARR_API_KEY = "PASTE_YOUR_RADARR_API_KEY_HERE"
+# API keys are intentionally NOT stored in this source file.
+# Set RADARR_KEY in your environment or use a protected wrapper/key file.
+# Check the URL if Radarr is not on the same machine, then review
+# SEARCHES_PER_RUN plus NORMAL_PROFILE_ID and UHD_PROFILE_ID below.
 RADARR_URL_DEFAULT = "http://127.0.0.1:7878"
 SEARCHES_PER_RUN = 50
 
 RADARR_URL = os.environ.get("RADARR_URL", RADARR_URL_DEFAULT).rstrip("/")
-API_KEY = os.environ.get("RADARR_KEY", RADARR_API_KEY).strip()
+API_KEY = os.environ.get("RADARR_KEY", "").strip()
 SEARCHES_PER_RUN = int(os.environ.get("RADARR_SEARCHES_PER_RUN", SEARCHES_PER_RUN))
-
-if API_KEY == "PASTE_YOUR_RADARR_API_KEY_HERE":
-    API_KEY = ""
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.environ.get(\n    "RADARR_OPTIMIZER_STATE",\n    os.path.join(SCRIPT_DIR, "radarr-smart-optimizer-state.json")\n)
@@ -83,7 +76,7 @@ LIVE = "--live" in sys.argv
 if not API_KEY:
     print("ERROR: Radarr API key is not configured.")
     print()
-    print("Edit RADARR_API_KEY near the top of this script, or set RADARR_KEY.")
+    print("Set RADARR_KEY in your environment or protected wrapper/key file.")
     print("Then run: python3 radarr-smart-optimizer.py")
     sys.exit(1)
 
