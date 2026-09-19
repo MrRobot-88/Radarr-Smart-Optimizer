@@ -18,6 +18,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OPTIMIZER = os.environ.get("RADARR_OPTIMIZER_SCRIPT", os.path.join(BASE_DIR, "radarr-smart-optimizer.py"))
 STATE_FILE = os.environ.get("RADARR_OPTIMIZER_STATE", os.path.join(BASE_DIR, "radarr-smart-optimizer-state.json"))
 RADARR_URL = os.environ.get("RADARR_URL", "http://127.0.0.1:7878").rstrip("/")
+SONARR_URL = os.environ.get("SONARR_URL", "http://127.0.0.1:8989").rstrip("/")
+SONARR_KEY = os.environ.get("SONARR_KEY", "").strip()
+SONARR_STATE_FILE = os.environ.get("SONARR_OPTIMIZER_STATE", os.path.join(BASE_DIR, "sonarr-smart-optimizer-state.json"))
 API_KEY = os.environ.get("RADARR_KEY", "").strip()
 HOST = os.environ.get("RADARR_UI_HOST", "127.0.0.1")
 PORT = int(os.environ.get("RADARR_UI_PORT", "8788"))
@@ -48,6 +51,69 @@ def radarr_get(path):
     if not API_KEY:
         raise RuntimeError("RADARR_KEY is not configured")
     return radarr_request(path)
+
+
+def sonarr_get(path):
+    if not SONARR_KEY:
+        raise RuntimeError("SONARR_KEY is not configured")
+    req = urllib.request.Request(
+        SONARR_URL + "/api/v3" + path,
+        headers={"X-Api-Key": SONARR_KEY, "Accept": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as response:
+        raw = response.read().decode("utf-8")
+        return json.loads(raw) if raw else {}
+
+
+def load_sonarr_state():
+    try:
+        with open(SONARR_STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"daily": {}, "episodes": {}}
+
+
+def sonarr_history_records():
+    records = []
+    for page_num in range(1, HISTORY_PAGES + 1):
+        data = sonarr_get("/history?page=%d&pageSize=100&sortKey=date&sortDirection=descending" % page_num)
+        batch = data.get("records", [])
+        records.extend(batch)
+        if len(batch) < 100:
+            break
+    return records
+
+
+def sonarr_queue_records():
+    data = sonarr_get("/queue?page=1&pageSize=100&sortKey=timeleft&sortDirection=ascending")
+    return data.get("records", [])
+
+
+def sonarr_completed_upgrades(records):
+    pending = {}
+    upgrades = []
+    for event in reversed(records):
+        episode_id = event.get("episodeId")
+        etype = event.get("eventType")
+        data = event.get("data") or {}
+        if etype == "episodeFileDeleted" and data.get("reason") == "Upgrade":
+            try:
+                pending[episode_id] = int(data.get("size") or 0)
+            except (TypeError, ValueError):
+                pass
+        elif etype == "downloadFolderImported" and episode_id in pending:
+            try:
+                new_size = int(data.get("size") or 0)
+            except (TypeError, ValueError):
+                new_size = 0
+            old_size = pending.pop(episode_id)
+            if old_size > 0 and new_size > 0:
+                upgrades.append({
+                    "date": event.get("date") or "",
+                    "title": event.get("sourceTitle") or ("Episode ID %s" % episode_id),
+                    "old": old_size, "new": new_size, "saved": old_size - new_size,
+                })
+    return sorted(upgrades, key=lambda x: x["date"], reverse=True)
 
 
 def load_state():
@@ -282,7 +348,7 @@ a{color:inherit}
 .topbar{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:28px}
 .brand{display:flex;align-items:center;gap:13px}.mark{width:42px;height:42px;border-radius:12px;display:grid;place-items:center;font-size:20px;font-weight:800;background:linear-gradient(145deg,#2563eb,#7c3aed);box-shadow:inset 0 1px rgba(255,255,255,.22),0 8px 24px rgba(37,99,235,.18)}
 .brandcopy h1{margin:0;font-size:1.15rem;letter-spacing:-.025em}.brandcopy div{font-size:.76rem;color:var(--muted);margin-top:2px}
-.nav{display:flex;align-items:center;gap:8px}.navchip,.status{height:34px;display:inline-flex;align-items:center;gap:8px;padding:0 11px;border-radius:9px;border:1px solid var(--line);background:#10151d;color:#b8c0cc;font-size:.76rem}
+.nav{display:flex;align-items:center;gap:8px}.appswitch{display:flex;gap:6px;padding:4px;border:1px solid var(--line);background:#0e131a;border-radius:11px}.appswitch a{text-decoration:none;padding:7px 12px;border-radius:8px;color:#8f9bad;font-size:.75rem;font-weight:700}.appswitch a:hover{color:#fff;background:#17202c}.appswitch a.active{color:#fff;background:#1d2939}.homewrap{min-height:70vh;display:grid;place-items:center}.homecard{text-align:center;max-width:720px}.homecard h1{font-size:2.25rem;margin:0 0 8px;letter-spacing:-.05em}.homecard p{color:var(--muted);margin:0 0 28px}.chooser{display:grid;grid-template-columns:1fr 1fr;gap:14px}.choice{text-decoration:none;text-align:left;padding:24px;border-radius:16px;border:1px solid var(--line);background:linear-gradient(180deg,var(--panel2),var(--panel));transition:.15s}.choice:hover{transform:translateY(-2px);border-color:#3b4758}.choice b{display:block;font-size:1.15rem;margin-bottom:6px}.choice span{font-size:.78rem;color:var(--muted)}.navchip,.status{height:34px;display:inline-flex;align-items:center;gap:8px;padding:0 11px;border-radius:9px;border:1px solid var(--line);background:#10151d;color:#b8c0cc;font-size:.76rem}
 .dot{width:7px;height:7px;border-radius:999px;background:var(--good);box-shadow:0 0 10px rgba(134,239,172,.55)}
 .hero{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;margin-bottom:18px}
 .hero h2{font-size:1.75rem;line-height:1.1;letter-spacing:-.04em;margin:0 0 7px}.hero p{margin:0;color:var(--muted);font-size:.86rem}
@@ -365,7 +431,7 @@ def page():
 
     return """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0b0e13"><title>Radarr Smart Optimizer</title><style>%s</style></head>
 <body><div class="shell">
-<div class="topbar"><div class="brand"><div class="mark">R</div><div class="brandcopy"><h1>Radarr Smart Optimizer</h1><div>Library optimization dashboard</div></div></div><div class="nav"><span class="navchip">Overview</span><span class="status"><span class="dot"></span>%s</span></div></div>
+<div class="topbar"><div class="brand"><div class="mark">R</div><div class="brandcopy"><h1>Radarr Smart Optimizer</h1><div>Library optimization dashboard</div></div></div><div class="nav"><div class="appswitch"><a class="active" href="/radarr">Radarr</a><a href="/sonarr">Sonarr</a></div><span class="status"><span class="dot"></span>%s</span></div></div>
 <div class="hero"><div><h2>Overview</h2><p>See savings, active downloads, problem jobs and optimizer activity in one place.</p></div>%s</div>
 %s%s
 <div class="toolbar"><div class="searchbox"><span class="searchicon">⌕</span><input id="librarySearch" autocomplete="off" placeholder="Search releases and current downloads…"></div></div>
@@ -408,11 +474,68 @@ box.addEventListener('input',()=>{const q=box.value.trim().toLowerCase();documen
         html.escape(status), "Actions enabled" if ENABLE_ACTIONS else "Read-only")
 
 
+
+def home_page():
+    return """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Smart Optimizer</title><style>%s</style></head><body><div class="shell homewrap"><div class="homecard"><div class="brand" style="justify-content:center;margin-bottom:24px"><div class="mark">S</div></div><h1>Smart Optimizer</h1><p>Choose the library you want to inspect.</p><div class="chooser"><a class="choice" href="/radarr"><b>Radarr →</b><span>Movies · storage savings · download radar</span></a><a class="choice" href="/sonarr"><b>Sonarr →</b><span>Episodes · storage savings · download radar</span></a></div></div></div></body></html>""" % CSS
+
+
+def sonarr_page():
+    state = load_sonarr_state()
+    today = time.strftime("%Y-%m-%d")
+    used = int((state.get("daily") or {}).get(today, {}).get("searches", 0))
+    error = ""
+    try:
+        records = sonarr_history_records()
+        upgrades = sonarr_completed_upgrades(records)
+        queue = sonarr_queue_records()
+    except Exception as exc:
+        upgrades, queue = [], []
+        error = str(exc)
+    saved = sum(x["saved"] for x in upgrades)
+    positive = sum(1 for x in upgrades if x["saved"] > 0)
+    rows = ""
+    for x in upgrades[:20]:
+        delta = gib(x["saved"])
+        cls = "good" if delta >= 0 else "bad"
+        rows += "<tr><td>%s</td><td>%.2f GiB</td><td>%.2f GiB</td><td class='%s'>%+.2f GiB</td></tr>" % (
+            html.escape(x["title"]), gib(x["old"]), gib(x["new"]), cls, delta)
+    if not rows:
+        rows = "<tr><td colspan='4' class='muted'>No completed episode upgrade pairs found in the loaded history window.</td></tr>"
+    qrows = ""
+    for x in queue[:20]:
+        size = float(x.get("size") or 0); left = float(x.get("sizeleft") or 0)
+        progress = max(0.0, min(100.0, ((size-left)/size*100.0) if size else 0.0))
+        title = x.get("title") or ("Episode ID %s" % x.get("episodeId"))
+        status = x.get("status") or x.get("trackedDownloadStatus") or "unknown"
+        qrows += "<div class='queueitem'><div class='qtop'><div class='qtitle'>%s</div><div>%s</div></div><div class='qmeta'>%.1f%%</div><div class='progress'><span style='width:%.1f%%'></span></div></div>" % (
+            html.escape(str(title)), html.escape(str(status)), progress, progress)
+    if not qrows:
+        qrows = "<div class='empty'>Nothing is currently in Sonarr's download queue.</div>"
+    err = ("<div class='notice bad'>Sonarr API error: %s</div>" % html.escape(error)) if error else ""
+    return """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sonarr Smart Optimizer</title><style>%s</style></head><body><div class="shell">
+<div class="topbar"><div class="brand"><div class="mark">S</div><div class="brandcopy"><h1>Sonarr Smart Optimizer</h1><div>Episode optimization dashboard</div></div></div><div class="nav"><div class="appswitch"><a href="/radarr">Radarr</a><a class="active" href="/sonarr">Sonarr</a></div><span class="status"><span class="dot"></span>Idle</span></div></div>
+<div class="hero"><div><h2>Overview</h2><p>See episode savings, active downloads and optimizer activity in one place.</p></div></div>%s
+<div class="grid"><div class="stat"><div class="stathead"><span><span class="mini">↘</span>Storage saved</span></div><div class="value %s">%+.2f GiB</div><div class="sub">Observed across loaded Sonarr upgrade history</div></div>
+<div class="stat"><div class="stathead"><span><span class="mini">✓</span>Space reductions</span></div><div class="value">%d</div><div class="sub">Episode replacements that ended smaller</div></div>
+<div class="stat"><div class="stathead"><span><span class="mini">↓</span>Active downloads</span></div><div class="value">%d</div><div class="sub">Current Sonarr queue</div></div>
+<div class="stat"><div class="stathead"><span><span class="mini">⌕</span>Searches today</span></div><div class="value">%d</div><div class="sub">Optimizer state counter</div></div></div>
+<div class="layout"><div><div class="panel"><div class="panelhead"><div><h3>Recent episode changes</h3><p>Observed Sonarr upgrade pairs; not all are necessarily optimizer-triggered.</p></div><span class="badge">HISTORY</span></div><table><thead><tr><th>Release</th><th>Before</th><th>After</th><th>Change</th></tr></thead><tbody>%s</tbody></table></div></div>
+<div><div class="panel"><div class="panelhead"><div><h3>Download radar</h3><p>Live Sonarr queue.</p></div><span class="badge">%d ACTIVE</span></div>%s</div></div></div>
+<div class="footer"><a href="/">Smart Optimizer</a> · Sonarr dashboard</div></div></body></html>""" % (
+        CSS, err, "good" if saved >= 0 else "bad", gib(saved), positive, len(queue), used, rows, len(queue), qrows)
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path.split("?", 1)[0] != "/":
+        path = self.path.split("?", 1)[0]
+        if path == "/":
+            rendered = home_page()
+        elif path == "/radarr":
+            rendered = page()
+        elif path == "/sonarr":
+            rendered = sonarr_page()
+        else:
             self.send_error(404); return
-        body = page().encode("utf-8")
+        body = rendered.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -429,7 +552,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 print("[ui] safe import failed:", exc)
                 self.send_error(409, str(exc)); return
-            self.send_response(303); self.send_header("Location", "/"); self.end_headers(); return
+            self.send_response(303); self.send_header("Location", "/radarr"); self.end_headers(); return
         if self.path != "/run" or not ENABLE_ACTIONS:
             self.send_error(403); return
         mode = (form.get("mode") or [""])[0]
@@ -437,7 +560,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(400); return
         run_optimizer(mode == "live")
         self.send_response(303)
-        self.send_header("Location", "/")
+        self.send_header("Location", "/radarr")
         self.end_headers()
 
     def log_message(self, fmt, *args):
