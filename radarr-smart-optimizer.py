@@ -660,7 +660,7 @@ def collect_candidates(state, queued_ids):
             "target_resolution": target_resolution,
             "size_bytes": size_bytes,
             "size_mib": mib(size_bytes),
-            "codec": current_codec(media),
+            "codec": current_codec(movie_file),
             "audio_channels": radarr_current_audio_channels(movie_file),
             "atmos": radarr_current_atmos(movie_file),
             "dynamic_range": radarr_current_dynamic_range(movie_file),
@@ -695,7 +695,16 @@ def rejection_allowed(rejection):
 
     reason = reason.lower()
 
-    return "existing file meets cutoff" in reason
+    # The optimizer has its own conservative quality gate below. Radarr may
+    # call a smaller same-resolution BluRay release a downgrade when the current
+    # file is a Remux. That is not automatically a downgrade for this project:
+    # resolution/HDR/DV/audio protections and storage efficiency decide.
+    optimizer_quality_rejections = (
+        "existing file meets cutoff",
+        "not an upgrade for existing movie file",
+        "quality for existing file on disk is of equal or higher preference",
+    )
+    return any(text in reason for text in optimizer_quality_rejections)
 
 
 def radarr_rejections_ok(release):
@@ -766,11 +775,15 @@ def evaluate_release(item, release, state):
 
     saving = ((current_mib - candidate_mib) / current_mib) * 100.0
 
-    # 5% saving is required only for same-resolution replacement.
-    # A legitimate UHD-profile 1080p -> 2160p upgrade may be larger.
+    # Optimization policy:
+    # - Same resolution must meaningfully reduce storage.
+    # - A real 1080p -> 2160p resolution upgrade may be larger, but only within
+    #   the strict 4K ceiling above and while preserving HDR/DV/audio rules.
+    # - We never accept a same-resolution candidate merely because Radarr ranks
+    #   its source/quality label higher.
     if candidate_resolution == current_resolution:
         if saving < MIN_SAVING_PERCENT:
-            return None, "less than 5 percent saving"
+            return None, "same-resolution candidate does not save enough space"
 
     candidate_codec = codec_from_text(title)
     candidate_channels = audio_channels_from_text(title)
@@ -834,9 +847,10 @@ def choose_best(item, releases, state):
     if not pool:
         return None
 
-    # Same resolution: storage saving is the primary goal.
-    # x265/HEVC is only a secondary preference, never a reason
-    # to choose a larger file over a smaller qualifying x264 file.
+    # Within an accepted resolution tier, storage efficiency is primary.
+    # All candidates here already passed the no-resolution-downgrade,
+    # HDR/DV, audio, Atmos, seeder and size gates. x265/HEVC is only a
+    # secondary preference and never justifies a larger same-resolution file.
     pool.sort(key=lambda x: (
         x["size_bytes"],
         0 if x["codec"] == "x265" else 1,
