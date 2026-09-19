@@ -1,0 +1,114 @@
+# Radarr Smart Optimizer
+
+A small Python tool that searches your **existing Radarr library** for smaller replacement releases while applying safety checks before it asks Radarr to grab anything.
+
+It is **dry-run by default**. It does not delete media files, call Radarr DELETE endpoints, or control your download client directly. In live mode, the script sends the selected release to Radarr and lets Radarr handle its normal download/import/replacement workflow.
+
+## What it protects
+
+- Keeps 1080p at 1080p and 2160p at 2160p in the current optimizer logic.
+- Requires a minimum size saving for same-resolution replacements.
+- Protects HDR and Dolby Vision compatibility rules.
+- Rejects Dolby Vision-only candidates where an HDR fallback is required.
+- Protects audio channel count and Atmos where detected.
+- Rejects releases with no known seeders.
+- Blocks suspicious executable/script filenames in release titles.
+- Rechecks the Radarr queue immediately before a live grab.
+- Remembers search attempts in a local state file.
+- Runs at most two optimizer search cycles per movie, with a 180-day wait before the second cycle.
+
+## Requirements
+
+- Radarr with its v3 API reachable from the machine running the script.
+- Python 3.8+.
+- Your Radarr API key.
+- Indexers/download clients already configured normally in Radarr/Prowlarr.
+
+No third-party Python packages are required.
+
+## Quick start
+
+Download `radarr-smart-optimizer.py`, then set your API key:
+
+```sh
+export RADARR_KEY='YOUR_API_KEY'
+python3 radarr-smart-optimizer.py
+```
+
+That is a **dry run**. Review the choices before enabling live mode.
+
+When you're satisfied:
+
+```sh
+python3 radarr-smart-optimizer.py --live
+```
+
+Live mode can start downloads through Radarr.
+
+## Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `RADARR_URL` | `http://127.0.0.1:7878` | Radarr URL |
+| `RADARR_KEY` | none | Radarr API key (required) |
+| `RADARR_OPTIMIZER_STATE` | state JSON beside the script | State-file location |
+| `RADARR_DAILY_SEARCH_BUDGET` | `300` | Maximum optimizer searches per live day |
+| `RADARR_MIN_SEEDERS` | `1` | Minimum known seeders |
+| `RADARR_MIN_SAVING_PERCENT` | `5` | Minimum same-resolution saving |
+| `RADARR_NORMAL_PROFILE_ID` | `4` | Normal profile ID used by this version |
+| `RADARR_UHD_PROFILE_ID` | `5` | UHD profile ID used by this version |
+
+Radarr normally uses port **7878**. Set `RADARR_URL` if yours uses another port.
+
+## 4K Dolby Vision + HDR
+
+The current optimizer includes its conservative 2160p Dolby Vision + HDR size policy. Dolby Vision-only candidates are rejected; releases classified as Dolby Vision + HDR fallback are handled separately by the optimizer's safety rules.
+
+Review a dry run against your own release naming/indexers before live mode because HDR/DV detection depends partly on release metadata.
+
+## Scheduling
+
+After testing manually, schedule the same command with cron, Synology Task Scheduler, or another scheduler. Keep the API key in an environment variable or protected wrapper/key file instead of committing it.
+
+The script enforces its configured daily search budget even if it is scheduled several times per day.
+
+### Synology DSM Task Scheduler example
+
+On Synology DSM, open **Control Panel → Task Scheduler → Create → Scheduled Task → User-defined script**.
+
+Use a user that can run Python and access the optimizer folder. Under **Schedule**, choose how often you want it to run. A practical example is every 4 hours.
+
+Under **Task Settings → User-defined script**, use a protected wrapper script rather than putting the API key directly in Task Scheduler. Example wrapper:
+
+```sh
+#!/bin/sh
+export RADARR_KEY="$(cat /path/to/.radarr-smart-optimizer-key)"
+exec python3 /path/to/radarr-smart-optimizer.py --live
+```
+
+Protect the key and wrapper:
+
+```sh
+chmod 600 /path/to/.radarr-smart-optimizer-key
+chmod 700 /path/to/run-radarr-smart-optimizer.sh
+```
+
+Then make the DSM task run:
+
+```sh
+/path/to/run-radarr-smart-optimizer.sh
+```
+
+Run the optimizer manually in **dry-run mode first**. Only add `--live` to the scheduled wrapper after you have checked its proposed replacements.
+
+## State file
+
+By default the optimizer creates `radarr-smart-optimizer-state.json` beside the script. It tracks optimizer search cycles, daily search counts, and recently attempted releases. Do not commit this file.
+
+Existing old state entries without `search_cycles` do not automatically count as one of the new two-cycle searches.
+
+## Important
+
+Release metadata can be incomplete or misleading. **Dry-run first** and check what the optimizer proposes for your own library before enabling `--live`.
+
+Looking for TV episodes instead? See **Sonarr Smart Optimizer**: https://github.com/MrRobot-88/Sonarr-Smart-Optimizer
