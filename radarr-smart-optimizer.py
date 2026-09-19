@@ -39,7 +39,10 @@ API_KEY = os.environ.get("RADARR_KEY", "").strip()
 SEARCHES_PER_RUN = int(os.environ.get("RADARR_SEARCHES_PER_RUN", SEARCHES_PER_RUN))
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-STATE_FILE = os.environ.get(\n    "RADARR_OPTIMIZER_STATE",\n    os.path.join(SCRIPT_DIR, "radarr-smart-optimizer-state.json")\n)
+STATE_FILE = os.environ.get(
+    "RADARR_OPTIMIZER_STATE",
+    os.path.join(SCRIPT_DIR, "radarr-smart-optimizer-state.json")
+)
 
 NORMAL_PROFILE_ID = 4
 UHD_PROFILE_ID = 5
