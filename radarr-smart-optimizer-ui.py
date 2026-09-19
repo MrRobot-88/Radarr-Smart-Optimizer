@@ -72,10 +72,23 @@ def queue_health(rows):
         status = str(row.get("status") or "").lower()
         tracked = str(row.get("trackedDownloadStatus") or "").lower()
         messages = row.get("statusMessages") or []
-        message_text = " ".join(
-            str(m.get("title") or "") + " " + " ".join(str(x.get("message") or "") for x in (m.get("messages") or []))
-            for m in messages if isinstance(m, dict)
-        ).strip()
+        message_parts = []
+        for m in messages:
+            if not isinstance(m, dict):
+                continue
+            title = str(m.get("title") or "")
+            details = m.get("messages") or []
+            if isinstance(details, list):
+                detail_text = " ".join(
+                    str(x.get("message") or "") if isinstance(x, dict) else str(x)
+                    for x in details
+                )
+            elif isinstance(details, dict):
+                detail_text = str(details.get("message") or details)
+            else:
+                detail_text = str(details)
+            message_parts.append((title + " " + detail_text).strip())
+        message_text = " ".join(x for x in message_parts if x).strip()
         size = float(row.get("size") or 0)
         left = float(row.get("sizeleft") or 0)
         progress = max(0.0, min(100.0, ((size - left) / size * 100.0) if size else 0.0))
