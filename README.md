@@ -2,7 +2,7 @@
 
 A small Python tool that searches your **existing Radarr library** for smaller replacement releases while applying safety checks before it asks Radarr to grab anything.
 
-It is **dry-run by default**. It does not delete media files, call Radarr DELETE endpoints, or control your download client directly. In live mode, the script sends the selected release to Radarr and lets Radarr handle its normal download/import/replacement workflow.
+It is **dry-run by default**. The script does not call Radarr DELETE endpoints or control your download client directly. In live mode, it sends the selected release to Radarr; after a successful download/import, **Radarr may replace the existing movie file as part of its normal upgrade workflow**.
 
 ## Why use it?
 
@@ -12,7 +12,7 @@ It is aimed at people who want to reduce storage use without simply lowering eve
 
 ## What it protects
 
-- Keeps 1080p at 1080p and 2160p at 2160p in the current optimizer logic.
+- Keeps normal-profile 1080p at 1080p and 2160p at 2160p; an existing 1080p movie assigned to the configured UHD profile may upgrade to 2160p within the optimizer's size limit.
 - Requires a minimum size saving for same-resolution replacements.
 - Protects HDR and Dolby Vision compatibility rules.
 - Rejects Dolby Vision-only candidates where an HDR fallback is required.
@@ -89,7 +89,7 @@ This is useful for Docker, cron and Synology Task Scheduler.
 | --- | --- | --- |
 | `RADARR_URL` | `http://127.0.0.1:7878` | Radarr URL |
 | `RADARR_KEY` | none | Radarr API key (required) |
-| `RADARR_SEARCHES_PER_RUN` | `50` | Maximum interactive searches per execution |
+| `RADARR_SEARCHES_PER_RUN` | `10` | Maximum interactive searches per execution |
 | `RADARR_OPTIMIZER_STATE` | state JSON beside the script | State-file location |
 | `RADARR_DAILY_SEARCH_BUDGET` | `300` | Maximum optimizer searches per live day |
 | `RADARR_MIN_SEEDERS` | `1` | Minimum known seeders |
@@ -101,7 +101,7 @@ Radarr normally uses port **7878**. Set `RADARR_URL` if yours uses another port.
 
 ## 4K Dolby Vision + HDR
 
-The current optimizer includes its conservative 2160p Dolby Vision + HDR size policy. Dolby Vision-only candidates are rejected; releases classified as Dolby Vision + HDR fallback are handled separately by the optimizer's safety rules.
+The optimizer includes a conservative 2160p Dolby Vision + HDR size policy. Dolby Vision-only candidates are rejected; releases classified as Dolby Vision + HDR fallback are handled separately by the optimizer's safety rules.
 
 Review a dry run against your own release naming/indexers before live mode because HDR/DV detection depends partly on release metadata.
 
@@ -148,7 +148,7 @@ Existing old state entries without `search_cycles` do not automatically count as
 
 ## Important
 
-Release metadata can be incomplete or misleading. **Dry-run first** and check what the optimizer proposes for your own library before enabling `--live`.
+Candidate HDR/DV/Atmos/audio/codec checks rely partly on release metadata and release-title conventions, which can be incomplete or misleading. **Dry-run first** and check what the optimizer proposes for your own library before enabling `--live`.
 
 Looking for TV episodes instead? See **Sonarr Smart Optimizer**: https://github.com/MrRobot-88/Sonarr-Smart-Optimizer
 
