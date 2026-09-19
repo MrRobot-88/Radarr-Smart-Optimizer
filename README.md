@@ -4,6 +4,12 @@ A small Python tool that searches your **existing Radarr library** for smaller r
 
 It is **dry-run by default**. It does not delete media files, call Radarr DELETE endpoints, or control your download client directly. In live mode, the script sends the selected release to Radarr and lets Radarr handle its normal download/import/replacement workflow.
 
+## Why use it?
+
+Over time a Radarr library can end up with movie releases that are much larger than necessary. This optimizer revisits existing movie files and looks for smaller alternatives **without intentionally trading away the media properties it is designed to protect**.
+
+It is aimed at people who want to reduce storage use without simply lowering every quality profile or manually searching a large movie library.
+
 ## What it protects
 
 - Keeps 1080p at 1080p and 2160p at 2160p in the current optimizer logic.
