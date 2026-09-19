@@ -29,15 +29,25 @@ job_lock = threading.Lock()
 job = {"running": False, "mode": None, "started": None, "finished": None, "returncode": None, "output": ""}
 
 
+def radarr_request(path, method="GET", payload=None):
+    if not API_KEY:
+        raise RuntimeError("RADARR_KEY is not configured")
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        RADARR_URL + "/api/v3" + path,
+        data=data,
+        method=method,
+        headers={"X-Api-Key": API_KEY, "Accept": "application/json",
+                 "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as response:
+        raw = response.read().decode("utf-8")
+        return json.loads(raw) if raw else {}
+
 def radarr_get(path):
     if not API_KEY:
         raise RuntimeError("RADARR_KEY is not configured")
-    req = urllib.request.Request(
-        RADARR_URL + "/api/v3" + path,
-        headers={"X-Api-Key": API_KEY, "Accept": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=20) as response:
-        return json.loads(response.read().decode("utf-8"))
+    return radarr_request(path)
 
 
 def load_state():
@@ -117,8 +127,84 @@ def queue_health(rows):
             "attention": attention,
             "health": health,
             "health_kind": health_kind,
+            "queue_id": row.get("id"),
         })
     return result
+
+
+def repair_import(queue_id):
+    """Reprocess one completed Radarr queue item using COPY mode.
+
+    This is intentionally user-triggered. It only handles the specific
+    quality-hierarchy rejection the optimizer understands; all other queue
+    failures remain untouched.
+    """
+    rows = queue_records()
+    row = next((x for x in rows if str(x.get("id")) == str(queue_id)), None)
+    if not row:
+        raise RuntimeError("Queue item is no longer present")
+
+    classified = queue_health([row])[0]
+    if classified.get("health_kind") != "optimizer_blocked":
+        raise RuntimeError("This item is not an optimizer import block")
+    if str(row.get("status") or "").lower() != "completed":
+        raise RuntimeError("Download is not completed")
+    if str(row.get("trackedDownloadState") or "").lower() != "importpending":
+        raise RuntimeError("Download is not waiting for import")
+    if int(row.get("sizeleft") or 0) != 0:
+        raise RuntimeError("Download still has data remaining")
+
+    movie_id = int(row.get("movieId"))
+    movie = radarr_get("/movie/%d" % movie_id)
+    old_file = movie.get("movieFile") or {}
+    old_size = int(old_file.get("size") or 0)
+    new_size = int(row.get("size") or 0)
+    old_res = (((old_file.get("quality") or {}).get("quality") or {}).get("resolution") or 0)
+    new_res = (((row.get("quality") or {}).get("quality") or {}).get("resolution") or 0)
+    if not old_size or not new_size or not old_res or not new_res:
+        raise RuntimeError("Cannot safely compare current and downloaded file")
+    if int(new_res) < int(old_res):
+        raise RuntimeError("Refusing resolution downgrade")
+    if int(new_res) == int(old_res) and new_size >= old_size:
+        raise RuntimeError("Refusing same-resolution replacement that is not smaller")
+
+    download_id = str(row.get("downloadId") or "")
+    if not download_id:
+        raise RuntimeError("Queue item has no downloadId")
+
+    items = radarr_get("/manualimport?downloadId=%s&movieId=%d&filterExistingFiles=true" %
+                       (urllib.parse.quote(download_id), movie_id))
+    usable = []
+    for item in items if isinstance(items, list) else []:
+        rejections = item.get("rejections") or []
+        reasons = " ".join(str((r.get("reason") or r.get("message") or "")) if isinstance(r, dict) else str(r)
+                           for r in rejections).lower()
+        # Only override Radarr's source-quality hierarchy. Anything else stays blocked.
+        bad = [r for r in rejections if "not an upgrade for existing movie file" not in
+               str((r.get("reason") or r.get("message") or "")) .lower()]
+        if not bad:
+            usable.append(item)
+    if len(usable) != 1:
+        raise RuntimeError("Expected exactly one safely reprocessable video file, found %d" % len(usable))
+
+    item = usable[0]
+    payload = {
+        "name": "ManualImport",
+        "files": [{
+            "path": item.get("path"),
+            "folderName": item.get("folderName"),
+            "quality": item.get("quality"),
+            "languages": item.get("languages") or row.get("languages") or [],
+            "releaseGroup": item.get("releaseGroup"),
+            "indexerFlags": item.get("indexerFlags") or 0,
+            "downloadId": download_id,
+            "movieId": movie_id,
+        }],
+        "importMode": 2
+    }
+    if not payload["files"][0]["path"]:
+        raise RuntimeError("Radarr did not return an importable file path")
+    return radarr_request("/command", method="POST", payload=payload)
 
 
 def completed_upgrades(records):
@@ -261,7 +347,7 @@ def page():
         qrows += """<div class="queueitem filterrow%s" data-search="%s"><div class="qtop"><div class="qtitle">%s</div><div class="%s">%s</div></div><div class="qmeta">%.1f%% · %s</div><div class="progress"><span style="width:%.1f%%"></span></div></div>""" % (
             extra, html.escape(x["title"].lower(), quote=True), html.escape(x["title"]), cls,
             html.escape(str(x.get("health") or x["status"])),
-            x["progress"], html.escape(note), x["progress"])
+            x["progress"], html.escape(note) + ("""<form method="post" action="/repair-import" style="margin-top:9px"><input type="hidden" name="queue_id" value="%s"><button class="live" type="submit">Try safe import</button></form>""" % html.escape(str(x.get("queue_id") or ""), quote=True) if x.get("health_kind") == "optimizer_blocked" else ""), x["progress"])
     if not qrows:
         qrows = "<div class='empty'>Nothing is currently in Radarr's download queue.</div>"
     elif len(queue) > 4:
@@ -335,10 +421,17 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
-        if self.path != "/run" or not ENABLE_ACTIONS:
-            self.send_error(403); return
         length = min(int(self.headers.get("Content-Length", "0")), 4096)
         form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"))
+        if self.path == "/repair-import":
+            try:
+                repair_import((form.get("queue_id") or [""])[0])
+            except Exception as exc:
+                print("[ui] safe import failed:", exc)
+                self.send_error(409, str(exc)); return
+            self.send_response(303); self.send_header("Location", "/"); self.end_headers(); return
+        if self.path != "/run" or not ENABLE_ACTIONS:
+            self.send_error(403); return
         mode = (form.get("mode") or [""])[0]
         if mode not in ("dry", "live"):
             self.send_error(400); return
