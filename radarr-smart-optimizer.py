@@ -24,8 +24,26 @@ from datetime import datetime, timezone
 # - Search budgets are configurable; defaults are conservative for scheduled use
 # ============================================================
 
-RADARR_URL = os.environ.get("RADARR_URL", "http://127.0.0.1:7878").rstrip("/")
-API_KEY = os.environ.get("RADARR_KEY", "").strip()
+# ============================================================
+# QUICK SETUP - most users only need to edit this block
+# ============================================================
+# 1) Paste your Radarr API key below.
+# 2) Check the URL if Radarr is not on the same machine.
+# 3) Set how many interactive searches this script may do per run.
+# 4) IMPORTANT: review NORMAL_PROFILE_ID and UHD_PROFILE_ID below.
+#
+# Environment variables still work and override these values, which is
+# useful for Docker, cron and Synology Task Scheduler.
+RADARR_API_KEY = "PASTE_YOUR_RADARR_API_KEY_HERE"
+RADARR_URL_DEFAULT = "http://127.0.0.1:7878"
+SEARCHES_PER_RUN = 50
+
+RADARR_URL = os.environ.get("RADARR_URL", RADARR_URL_DEFAULT).rstrip("/")
+API_KEY = os.environ.get("RADARR_KEY", RADARR_API_KEY).strip()
+SEARCHES_PER_RUN = int(os.environ.get("RADARR_SEARCHES_PER_RUN", SEARCHES_PER_RUN))
+
+if API_KEY == "PASTE_YOUR_RADARR_API_KEY_HERE":
+    API_KEY = ""
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))\nSTATE_FILE = os.environ.get(\n    "RADARR_OPTIMIZER_STATE",\n    os.path.join(SCRIPT_DIR, "radarr-smart-optimizer-state.json")\n)
 
@@ -62,11 +80,10 @@ MAX_SEARCHES_PER_SERIES_PER_RUN = 3
 LIVE = "--live" in sys.argv
 
 if not API_KEY:
-    print("ERROR: RADARR_KEY is not set.")
+    print("ERROR: Radarr API key is not configured.")
     print()
-    print("Run like:")
-    print("  export RADARR_KEY='YOUR_API_KEY'")
-    print("  python3 radarr-smart-optimizer.py")
+    print("Edit RADARR_API_KEY near the top of this script, or set RADARR_KEY.")
+    print("Then run: python3 radarr-smart-optimizer.py")
     sys.exit(1)
 
 
@@ -1341,7 +1358,7 @@ def main():
     used = searches_used_today(state)
 
     # Maximum interactive searches in one execution.
-    PER_RUN_SEARCH_BUDGET = 50
+    PER_RUN_SEARCH_BUDGET = max(1, SEARCHES_PER_RUN)
 
     if LIVE:
         remaining = min(
