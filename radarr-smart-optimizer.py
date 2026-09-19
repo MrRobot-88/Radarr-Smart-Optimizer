@@ -51,12 +51,6 @@ DAILY_SEARCH_BUDGET = 300
 MIN_SEEDERS = 1
 MIN_SAVING_PERCENT = 5.0
 
-# Search cooldowns
-COOLDOWN_RESOLUTION_UPGRADE = 30
-COOLDOWN_X264 = 90
-COOLDOWN_X265_LARGE = 180
-COOLDOWN_X265_COMPACT = 365
-COOLDOWN_4K = 180
 
 # Don't deliberately grab the exact same release again for this long
 ATTEMPT_COOLDOWN_DAYS = 365
@@ -70,9 +64,6 @@ LARGE_2160P_MIB = 6000
 # Hard ceiling for a 1080p -> 2160p resolution upgrade.
 # 8 GiB = 8192 MiB.
 MAX_4K_UPGRADE_MIB = 8192
-
-# Prevent one large series from consuming the whole daily budget.
-MAX_SEARCHES_PER_SERIES_PER_RUN = 3
 
 LIVE = "--live" in sys.argv
 
@@ -466,7 +457,7 @@ def active_movie_ids():
     while True:
         path = (
             "/queue?page=%d&pageSize=100"
-            "&includeUnknownSeriesItems=true"
+            "&includeUnknownMovieItems=true"
         ) % page
 
         data = get(path)
@@ -501,7 +492,7 @@ def priority_score(item):
     Higher = search earlier.
 
     IMPORTANT:
-    This only decides WHICH existing episodes deserve one of
+    This only decides WHICH existing movies deserve one of
     our scarce interactive searches.
 
     It does NOT decide which release wins after searching.
@@ -518,12 +509,12 @@ def priority_score(item):
     score = 0.0
 
     # --------------------------------------------------------
-    # PROFILE 5 / 4K-PREFERRED SERIES
+    # PROFILE 5 / 4K-PREFERRED MOVIES
     # --------------------------------------------------------
     if item["profile_id"] == UHD_PROFILE_ID:
 
         # Missing target resolution is important, but don't give
-        # every 1080p episode an identical gigantic score.
+        # every 1080p movie an identical gigantic score.
         if res < 2160:
             score += 600000
 
