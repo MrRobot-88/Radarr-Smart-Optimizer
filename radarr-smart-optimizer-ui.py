@@ -93,6 +93,19 @@ def queue_health(rows):
         left = float(row.get("sizeleft") or 0)
         progress = max(0.0, min(100.0, ((size - left) / size * 100.0) if size else 0.0))
         attention = tracked in ("warning", "error") or status in ("warning", "failed")
+        lower_message = message_text.lower()
+        if "not an upgrade for existing movie file" in lower_message:
+            health = "Optimizer import blocked"
+            health_kind = "optimizer_blocked"
+        elif tracked == "error" or status == "failed":
+            health = "Failed"
+            health_kind = "failed"
+        elif tracked == "warning" or status == "warning":
+            health = "Needs attention"
+            health_kind = "warning"
+        else:
+            health = row.get("status") or row.get("trackedDownloadStatus") or "unknown"
+            health_kind = "normal"
         result.append({
             "title": row.get("title") or ("Movie ID %s" % row.get("movieId")),
             "movie_id": row.get("movieId"),
@@ -102,6 +115,8 @@ def queue_health(rows):
             "timeleft": row.get("timeleft") or "—",
             "message": message_text,
             "attention": attention,
+            "health": health,
+            "health_kind": health_kind,
         })
     return result
 
@@ -244,7 +259,7 @@ def page():
         extra = " extra" if i >= 4 else ""
         qrows += """<div class="queueitem filterrow%s" data-search="%s"><div class="qtop"><div class="qtitle">%s</div><div class="%s">%s</div></div><div class="qmeta">%.1f%% · %s</div><div class="progress"><span style="width:%.1f%%"></span></div></div>""" % (
             extra, html.escape(x["title"].lower(), quote=True), html.escape(x["title"]), cls,
-            "Needs attention" if x["attention"] else html.escape(str(x["status"])),
+            html.escape(str(x.get("health") or x["status"])),
             x["progress"], html.escape(note), x["progress"])
     if not qrows:
         qrows = "<div class='empty'>Nothing is currently in Radarr's download queue.</div>"
