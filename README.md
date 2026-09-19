@@ -131,3 +131,11 @@ Existing old state entries without `search_cycles` do not automatically count as
 Release metadata can be incomplete or misleading. **Dry-run first** and check what the optimizer proposes for your own library before enabling `--live`.
 
 Looking for TV episodes instead? See **Sonarr Smart Optimizer**: https://github.com/MrRobot-88/Sonarr-Smart-Optimizer
+
+
+## Related projects
+
+- https://github.com/MrRobot-88/Sonarr-Smart-Optimizer
+- https://github.com/MrRobot-88/Radarr-Smart-Optimizer
+- https://github.com/MrRobot-88/Deluge-Smart-Cleanup
+
