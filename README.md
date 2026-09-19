@@ -47,22 +47,46 @@ No third-party Python packages are required.
 
 ## Quick start
 
-Download `radarr-smart-optimizer.py`, then set your API key:
+This is designed to be **download, edit, run**.
+
+1. Download `radarr-smart-optimizer.py`.
+2. Open it in any text editor.
+3. Near the top, paste your Radarr API key into `RADARR_API_KEY`.
+4. Set `SEARCHES_PER_RUN` to the maximum number of interactive searches you want each run (default: `50`).
+5. **Review `NORMAL_PROFILE_ID` and `UHD_PROFILE_ID`** and make sure they match your Radarr quality-profile IDs.
+6. Save the file and run:
 
 ```sh
-export RADARR_KEY='YOUR_API_KEY'
 python3 radarr-smart-optimizer.py
 ```
 
-That is a **dry run**. Review the choices before enabling live mode.
+That is a **dry run**. It will show what it would choose without starting downloads or changing persistent optimizer state.
 
-When you're satisfied:
+When the dry-run results look right:
 
 ```sh
 python3 radarr-smart-optimizer.py --live
 ```
 
-Live mode can start downloads through Radarr.
+Live mode can ask Radarr to grab releases.
+
+### Where to find the API key
+
+In Radarr, open **Settings → General → Security → API Key**. Copy that value into `RADARR_API_KEY` near the top of the script.
+
+You do **not** need to edit the Python code anywhere else for a normal setup.
+
+### Optional: environment variables
+
+If you prefer not to put the API key in the script, environment variables still override the quick-setup values:
+
+```sh
+export RADARR_KEY='YOUR_API_KEY'
+export RADARR_SEARCHES_PER_RUN=50
+python3 radarr-smart-optimizer.py
+```
+
+This is useful for Docker, cron and Synology Task Scheduler.
 
 ## Configuration
 
@@ -70,6 +94,7 @@ Live mode can start downloads through Radarr.
 | --- | --- | --- |
 | `RADARR_URL` | `http://127.0.0.1:7878` | Radarr URL |
 | `RADARR_KEY` | none | Radarr API key (required) |
+| `RADARR_SEARCHES_PER_RUN` | `50` | Maximum interactive searches per execution |
 | `RADARR_OPTIMIZER_STATE` | state JSON beside the script | State-file location |
 | `RADARR_DAILY_SEARCH_BUDGET` | `300` | Maximum optimizer searches per live day |
 | `RADARR_MIN_SEEDERS` | `1` | Minimum known seeders |
