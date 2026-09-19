@@ -435,80 +435,6 @@ def dynamic_range_from_text(text):
     return "SDR_UNKNOWN"
 
 
-def dynamic_range_allowed(existing_hdr, candidate_range):
-    """
-    Dynamic-range replacement policy.
-
-    Candidate SDR_UNKNOWN means the release title does not explicitly
-    advertise HDR/DV. For selection purposes it is allowed exactly like
-    ordinary SDR UNLESS the existing file is positively known to be HDR.
-
-    Rules:
-      existing SDR/unknown -> SDR_UNKNOWN : ALLOW
-      existing SDR/unknown -> HDR         : ALLOW
-      existing SDR/unknown -> DV_HDR      : ALLOW
-
-      existing HDR         -> SDR_UNKNOWN : BLOCK
-      existing HDR         -> HDR         : ALLOW
-      existing HDR         -> DV_HDR      : ALLOW
-
-      DV_ONLY is ALWAYS blocked.
-    """
-
-    if candidate_range == "DV_ONLY":
-        return False
-
-    if existing_hdr and candidate_range == "SDR_UNKNOWN":
-        return False
-
-    return True
-
-
-def hdr_from_text(text):
-    return dynamic_range_from_text(text) in ("HDR", "DV_HDR")
-
-def hdr_from_media_info(media):
-    if not media:
-        return False
-
-    pieces = []
-
-    for key in (
-        "videoDynamicRange",
-        "videoDynamicRangeType",
-        "videoCodec",
-        "videoProfile"
-    ):
-        value = media.get(key)
-
-        if value:
-            pieces.append(str(value))
-
-    text = " ".join(pieces).lower()
-
-    return bool(
-        re.search(
-            r"(dolby|dovi|\bdv\b|hdr|hlg|pq)",
-            text
-        )
-    )
-
-
-def current_audio_channels(media):
-    if not media:
-        return None
-
-    value = media.get("audioChannels")
-
-    try:
-        if value is not None:
-            return float(value)
-    except Exception:
-        pass
-
-    return None
-
-
 def current_codec(file_obj):
     media = file_obj.get("mediaInfo") or {}
 
@@ -611,22 +537,6 @@ def active_movie_ids():
 # ============================================================
 # LOCAL LIBRARY CANDIDATES
 # ============================================================
-
-def cooldown_for(item):
-    if item["resolution"] < item["target_resolution"]:
-        return COOLDOWN_RESOLUTION_UPGRADE
-
-    if item["profile_id"] == UHD_PROFILE_ID:
-        return COOLDOWN_4K
-
-    if item["codec"] != "x265":
-        return COOLDOWN_X264
-
-    if item["size_mib"] <= COMPACT_1080P_X265_MIB:
-        return COOLDOWN_X265_COMPACT
-
-    return COOLDOWN_X265_LARGE
-
 
 def priority_score(item):
     """
