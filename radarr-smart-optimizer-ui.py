@@ -237,7 +237,8 @@ def page():
     positive = sum(1 for x in upgrades if x["saved"] > 0)
     total_before = sum(x["old"] for x in upgrades)
     reduction_pct = (saved / total_before * 100.0) if total_before else 0.0
-    attention = [x for x in queue if x["attention"]]
+    attention = [x for x in queue if x["attention"] and x.get("health_kind") != "optimizer_blocked"]
+    optimizer_blocked = [x for x in queue if x.get("health_kind") == "optimizer_blocked"]
     last_date = upgrades[0]["date"][:10] if upgrades else "—"
     with job_lock:
         snap = dict(job)
@@ -285,7 +286,7 @@ def page():
 <div class="grid">
 <div class="stat"><div class="stathead"><span><span class="mini">↘</span>Storage saved</span></div><div class="value %s">%+.2f GiB</div><div class="sub">Observed across loaded upgrade history</div></div>
 <div class="stat"><div class="stathead"><span><span class="mini">✓</span>Space reductions</span></div><div class="value">%d</div><div class="sub">Observed upgrades that ended smaller</div></div>
-<div class="stat"><div class="stathead"><span><span class="mini">↓</span>Active downloads</span></div><div class="value">%d</div><div class="sub">%d currently need attention</div></div>
+<div class="stat"><div class="stathead"><span><span class="mini">↓</span>Active downloads</span></div><div class="value">%d</div><div class="sub">%d need attention · %d optimizer import blocked</div></div>
 <div class="stat"><div class="stathead"><span><span class="mini">⌕</span>Searches today</span></div><div class="value">%d</div><div class="sub">Optimizer state counter</div></div>
 </div>
 <div class="layout"><div>
@@ -299,6 +300,7 @@ def page():
 <div class="metricline"><span>Observed net reduction</span><b class="%s">%.1f%%</b></div>
 <div class="metricline"><span>Smaller replacements</span><b>%d</b></div>
 <div class="metricline"><span>Downloads needing attention</span><b class="%s">%d</b></div>
+<div class="metricline"><span>Optimizer imports blocked</span><b class="%s">%d</b></div>
 <div class="metricline"><span>Last observed upgrade</span><b>%s</b></div>
 <div class="metricline"><span>Engine</span><b>%s</b></div>
 <div class="metricline"><span>UI mode</span><b>%s</b></div>
@@ -313,9 +315,10 @@ box.addEventListener('input',()=>{const q=box.value.trim().toLowerCase();documen
 </script></body></html>""" % (
         CSS, html.escape(status), actions, warning, err,
         "good" if saved >= 0 else "bad", gib(saved), positive,
-        len(queue), len(attention), used, rows, output, len(queue), qrows,
+        len(queue), len(attention), len(optimizer_blocked), used, rows, output, len(queue), qrows,
         "good" if reduction_pct >= 0 else "bad", reduction_pct, positive,
-        "bad" if attention else "good", len(attention), html.escape(last_date),
+        "bad" if attention else "good", len(attention),
+        "bad" if optimizer_blocked else "good", len(optimizer_blocked), html.escape(last_date),
         html.escape(status), "Actions enabled" if ENABLE_ACTIONS else "Read-only")
 
 
