@@ -59,6 +59,40 @@ def history_records():
     return records
 
 
+def queue_records():
+    """Return current Radarr download queue rows for the dashboard."""
+    data = radarr_get("/queue?page=1&pageSize=100&sortKey=timeleft&sortDirection=ascending")
+    return data.get("records", [])
+
+
+def queue_health(rows):
+    """Classify queue rows conservatively from Radarr's own status fields."""
+    result = []
+    for row in rows:
+        status = str(row.get("status") or "").lower()
+        tracked = str(row.get("trackedDownloadStatus") or "").lower()
+        messages = row.get("statusMessages") or []
+        message_text = " ".join(
+            str(m.get("title") or "") + " " + " ".join(str(x.get("message") or "") for x in (m.get("messages") or []))
+            for m in messages if isinstance(m, dict)
+        ).strip()
+        size = float(row.get("size") or 0)
+        left = float(row.get("sizeleft") or 0)
+        progress = max(0.0, min(100.0, ((size - left) / size * 100.0) if size else 0.0))
+        attention = tracked in ("warning", "error") or status in ("warning", "failed")
+        result.append({
+            "title": row.get("title") or ("Movie ID %s" % row.get("movieId")),
+            "movie_id": row.get("movieId"),
+            "status": row.get("status") or row.get("trackedDownloadStatus") or "unknown",
+            "tracked": row.get("trackedDownloadStatus") or "",
+            "progress": progress,
+            "timeleft": row.get("timeleft") or "—",
+            "message": message_text,
+            "attention": attention,
+        })
+    return result
+
+
 def completed_upgrades(records):
     """Pair Upgrade deletion -> subsequent import for the same movie.
 
@@ -154,6 +188,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px 17p
 .sidecontent{padding:16px}.metricline{display:flex;align-items:center;justify-content:space-between;padding:11px 0;border-bottom:1px solid #202731;font-size:.78rem}.metricline:last-child{border-bottom:0}.metricline span:first-child{color:var(--muted)}.metricline b{font-size:.8rem}
 pre{margin:0;white-space:pre-wrap;word-break:break-word;max-height:305px;overflow:auto;background:#0c1117;padding:15px 17px;color:#bbc5d3;font:11.5px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace}
 .footer{padding-top:22px;text-align:center;font-size:.68rem;color:#4c5667}
+.toolbar{display:flex;gap:10px;align-items:center;margin-bottom:16px}.searchbox{position:relative;flex:1}.searchbox input{width:100%;height:40px;border-radius:10px;border:1px solid var(--line);background:#0f141b;color:var(--text);padding:0 14px 0 38px;outline:none;font-size:.8rem}.searchbox input:focus{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.10)}.searchicon{position:absolute;left:13px;top:10px;color:#64748b}.queueitem{padding:14px 17px;border-bottom:1px solid #1f2630}.queueitem:last-child{border-bottom:0}.qtop{display:flex;justify-content:space-between;gap:12px;align-items:center}.qtitle{font-size:.8rem;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.qmeta{font-size:.7rem;color:var(--muted);margin-top:5px}.progress{height:5px;background:#0b1016;border-radius:99px;overflow:hidden;margin-top:10px}.progress span{display:block;height:100%;background:linear-gradient(90deg,#3b82f6,#8b5cf6);border-radius:99px}.attention{color:var(--warn)}.empty{padding:22px 17px;color:var(--muted);font-size:.78rem}.sectiontabs{display:flex;gap:5px;margin-bottom:12px}.tab{font-size:.72rem;padding:6px 9px;border-radius:8px;background:#10151d;border:1px solid var(--line);color:#8e99aa}.tab.active{color:#e5e7eb;background:#17202c}.kpi{font-size:.66rem;color:#667085;text-transform:uppercase;letter-spacing:.08em}
 @media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}.layout{grid-template-columns:1fr}.hero{align-items:flex-start;flex-direction:column}.topbar{align-items:flex-start;flex-direction:column}.nav{width:100%;justify-content:space-between}}
 @media(max-width:520px){.shell{padding:22px 14px 40px}.grid{grid-template-columns:1fr}.hero h2{font-size:1.45rem}th,td{padding:11px 12px}}
 """
@@ -166,70 +201,88 @@ def page():
     try:
         records = history_records()
         upgrades = completed_upgrades(records)
+        queue = queue_health(queue_records())
     except Exception as exc:
-        upgrades = []
+        upgrades, queue = [], []
         error = str(exc)
     saved = sum(x["saved"] for x in upgrades)
     positive = sum(1 for x in upgrades if x["saved"] > 0)
     total_before = sum(x["old"] for x in upgrades)
     reduction_pct = (saved / total_before * 100.0) if total_before else 0.0
+    attention = [x for x in queue if x["attention"]]
     last_date = upgrades[0]["date"][:10] if upgrades else "—"
     with job_lock:
         snap = dict(job)
+
     rows = ""
-    for x in upgrades[:12]:
+    for x in upgrades[:20]:
         delta = gib(x["saved"])
         cls = "good" if delta >= 0 else "bad"
-        rows += "<tr><td>%s</td><td>%.2f GiB</td><td>%.2f GiB</td><td class='%s'>%+.2f GiB</td></tr>" % (
-            html.escape(x["title"]), gib(x["old"]), gib(x["new"]), cls, delta)
+        rows += "<tr class='filterrow' data-search='%s'><td>%s</td><td>%.2f GiB</td><td>%.2f GiB</td><td class='%s'>%+.2f GiB</td></tr>" % (
+            html.escape(x["title"].lower(), quote=True), html.escape(x["title"]), gib(x["old"]), gib(x["new"]), cls, delta)
     if not rows:
         rows = "<tr><td colspan='4' class='muted'>No completed upgrade pairs found in the loaded history window.</td></tr>"
-    actions = """
-      <div class="actions">
+
+    qrows = ""
+    for x in queue[:20]:
+        cls = "attention" if x["attention"] else ""
+        note = x["message"] or ("Time left: %s" % x["timeleft"])
+        qrows += """<div class="queueitem filterrow" data-search="%s"><div class="qtop"><div class="qtitle">%s</div><div class="%s">%s</div></div><div class="qmeta">%.1f%% · %s</div><div class="progress"><span style="width:%.1f%%"></span></div></div>""" % (
+            html.escape(x["title"].lower(), quote=True), html.escape(x["title"]), cls,
+            "Needs attention" if x["attention"] else html.escape(str(x["status"])),
+            x["progress"], html.escape(note), x["progress"])
+    if not qrows:
+        qrows = "<div class='empty'>Nothing is currently in Radarr's download queue.</div>"
+
+    actions = """<div class="actions">
       <form method="post" action="/run"><input type="hidden" name="mode" value="dry"><button %s>Dry run</button></form>
       <form method="post" action="/run"><input type="hidden" name="mode" value="live"><button class="live" %s>Optimize now</button></form>
-      </div>
-    """ % ("" if ENABLE_ACTIONS and not snap["running"] else "disabled",
-           "" if ENABLE_ACTIONS and not snap["running"] else "disabled")
+      </div>""" % ("" if ENABLE_ACTIONS and not snap["running"] else "disabled",
+                    "" if ENABLE_ACTIONS and not snap["running"] else "disabled")
     output = html.escape(snap.get("output") or "No UI-started run yet.")
     status = "Running %s…" % snap["mode"] if snap["running"] else "Idle"
-    warning = "" if ENABLE_ACTIONS else "<div class='notice'>Read-only mode is active. Optimizer actions are disabled.</div>"
-    err = ("<div class='notice bad'>Radarr history error: %s</div>" % html.escape(error)) if error else ""
+    warning = "" if ENABLE_ACTIONS else "<div class='notice'>Read-only mode is active. Smart retry controls will only be enabled after we validate queue detection and candidate selection.</div>"
+    err = ("<div class='notice bad'>Radarr API error: %s</div>" % html.escape(error)) if error else ""
+
     return """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0b0e13"><title>Radarr Smart Optimizer</title><style>%s</style></head>
 <body><div class="shell">
-<div class="topbar"><div class="brand"><div class="mark">R</div><div class="brandcopy"><h1>Radarr Smart Optimizer</h1><div>Library optimization dashboard</div></div></div>
-<div class="nav"><span class="navchip">Overview</span><span class="status"><span class="dot"></span>%s</span></div></div>
-<div class="hero"><div><h2>Overview</h2><p>Storage savings, completed upgrades and optimizer activity at a glance.</p></div>%s</div>
+<div class="topbar"><div class="brand"><div class="mark">R</div><div class="brandcopy"><h1>Radarr Smart Optimizer</h1><div>Library optimization dashboard</div></div></div><div class="nav"><span class="navchip">Overview</span><span class="status"><span class="dot"></span>%s</span></div></div>
+<div class="hero"><div><h2>Overview</h2><p>See savings, active downloads, problem jobs and optimizer activity in one place.</p></div>%s</div>
 %s%s
+<div class="toolbar"><div class="searchbox"><span class="searchicon">⌕</span><input id="librarySearch" autocomplete="off" placeholder="Search releases and current downloads…"></div></div>
 <div class="grid">
-<div class="stat"><div class="stathead"><span><span class="mini">↘</span>Storage saved</span></div><div class="value %s">%+.2f GiB</div><div class="sub">Across loaded upgrade history</div></div>
-<div class="stat"><div class="stathead"><span><span class="mini">✓</span>Optimized</span></div><div class="value">%d</div><div class="sub">%d upgrades reduced storage</div></div>
-<div class="stat"><div class="stathead"><span><span class="mini">⌕</span>Searches today</span></div><div class="value">%d</div><div class="sub">From optimizer state</div></div>
-<div class="stat"><div class="stathead"><span><span class="mini">◉</span>Engine</span></div><div class="value" style="font-size:1.35rem">%s</div><div class="sub">Scheduled optimizer runs independently</div></div>
+<div class="stat"><div class="stathead"><span><span class="mini">↘</span>Storage saved</span></div><div class="value %s">%+.2f GiB</div><div class="sub">Observed across loaded upgrade history</div></div>
+<div class="stat"><div class="stathead"><span><span class="mini">✓</span>Space reductions</span></div><div class="value">%d</div><div class="sub">Observed upgrades that ended smaller</div></div>
+<div class="stat"><div class="stathead"><span><span class="mini">↓</span>Active downloads</span></div><div class="value">%d</div><div class="sub">%d currently need attention</div></div>
+<div class="stat"><div class="stathead"><span><span class="mini">⌕</span>Searches today</span></div><div class="value">%d</div><div class="sub">Optimizer state counter</div></div>
 </div>
-<div class="layout">
-<div>
-<div class="panel"><div class="panelhead"><div><h3>Recent optimizations</h3><p>Completed Radarr upgrade pairs and their real file-size change.</p></div><span class="badge">RADARR HISTORY</span></div>
-<table><thead><tr><th>Release</th><th>Before</th><th>After</th><th>Saved</th></tr></thead><tbody>%s</tbody></table></div>
+<div class="layout"><div>
+<div class="panel"><div class="panelhead"><div><h3>Recent file changes</h3><p>Observed Radarr upgrade pairs. These are not all necessarily optimizer-triggered.</p></div><span class="badge">HISTORY</span></div>
+<table><thead><tr><th>Release</th><th>Before</th><th>After</th><th>Change</th></tr></thead><tbody>%s</tbody></table></div>
 <div class="panel"><div class="panelhead"><div><h3>Optimizer activity</h3><p>Output from runs started through this dashboard.</p></div><span class="badge">ACTIVITY</span></div><pre>%s</pre></div>
 </div>
-<div class="panel"><div class="panelhead"><div><h3>Library impact</h3><p>Quick context from loaded history.</p></div><span class="badge">SUMMARY</span></div>
-<div class="sidecontent">
-<div class="metricline"><span>Net reduction</span><b class="%s">%.1f%%</b></div>
-<div class="metricline"><span>Successful reductions</span><b>%d / %d</b></div>
+<div>
+<div class="panel"><div class="panelhead"><div><h3>Download radar</h3><p>Live Radarr queue with problem jobs surfaced automatically.</p></div><span class="badge">%d ACTIVE</span></div>%s</div>
+<div class="panel"><div class="panelhead"><div><h3>Optimizer intelligence</h3><p>Useful context without pretending Radarr history equals optimizer success.</p></div><span class="badge">SUMMARY</span></div><div class="sidecontent">
+<div class="metricline"><span>Observed net reduction</span><b class="%s">%.1f%%</b></div>
+<div class="metricline"><span>Smaller replacements</span><b>%d</b></div>
+<div class="metricline"><span>Downloads needing attention</span><b class="%s">%d</b></div>
 <div class="metricline"><span>Last observed upgrade</span><b>%s</b></div>
-<div class="metricline"><span>History window</span><b>%d page%s</b></div>
+<div class="metricline"><span>Engine</span><b>%s</b></div>
 <div class="metricline"><span>UI mode</span><b>%s</b></div>
-</div></div>
+</div></div></div></div>
+<div class="footer">Radarr Smart Optimizer · storage intelligence, not another Radarr replacement</div>
 </div>
-<div class="footer">Radarr Smart Optimizer · optional lightweight overview</div>
-</div></body></html>""" % (
+<script>
+const box=document.getElementById('librarySearch');
+box.addEventListener('input',()=>{const q=box.value.trim().toLowerCase();document.querySelectorAll('.filterrow').forEach(el=>{el.style.display=!q||((el.dataset.search||'').includes(q))?'':'none';});});
+</script></body></html>""" % (
         CSS, html.escape(status), actions, warning, err,
-        "good" if saved >= 0 else "bad", gib(saved),
-        len(upgrades), positive, used, html.escape(status), rows, output,
-        "good" if reduction_pct >= 0 else "bad", reduction_pct,
-        positive, len(upgrades), html.escape(last_date), HISTORY_PAGES,
-        "" if HISTORY_PAGES == 1 else "s", "Actions enabled" if ENABLE_ACTIONS else "Read-only")
+        "good" if saved >= 0 else "bad", gib(saved), positive,
+        len(queue), len(attention), used, rows, output, len(queue), qrows,
+        "good" if reduction_pct >= 0 else "bad", reduction_pct, positive,
+        "bad" if attention else "good", len(attention), html.escape(last_date),
+        html.escape(status), "Actions enabled" if ENABLE_ACTIONS else "Read-only")
 
 
 class Handler(BaseHTTPRequestHandler):
