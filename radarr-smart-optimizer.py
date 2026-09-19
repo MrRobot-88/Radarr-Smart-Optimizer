@@ -393,48 +393,6 @@ def dangerous_release_title(text):
     return bool(re.search(pattern, text))
 
 
-def dynamic_range_from_text(text):
-    """
-    Conservative release-title classification.
-
-    Returns:
-      SDR_UNKNOWN
-      HDR
-      DV_ONLY
-      DV_HDR
-
-    IMPORTANT:
-    DV-only is never acceptable.
-    Dolby Vision must explicitly also advertise HDR/HDR10/HDR10+.
-    """
-    text = (text or "").lower()
-
-    has_dv = bool(
-        re.search(
-            r"\b(dv|dovi|dolby[\s._-]?vision)\b",
-            text
-        )
-    )
-
-    has_hdr = bool(
-        re.search(
-            r"\b(hdr10\+?|hdr|hlg)\b",
-            text
-        )
-    )
-
-    if has_dv and has_hdr:
-        return "DV_HDR"
-
-    if has_dv:
-        return "DV_ONLY"
-
-    if has_hdr:
-        return "HDR"
-
-    return "SDR_UNKNOWN"
-
-
 def current_codec(file_obj):
     media = file_obj.get("mediaInfo") or {}
 
