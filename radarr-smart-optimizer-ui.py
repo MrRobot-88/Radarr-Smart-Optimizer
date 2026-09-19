@@ -27,6 +27,47 @@ PORT = int(os.environ.get("RADARR_UI_PORT", "8788"))
 ENABLE_ACTIONS = os.environ.get("RADARR_UI_ENABLE_ACTIONS", "0").lower() in ("1", "true", "yes")
 HISTORY_PAGES = max(1, min(20, int(os.environ.get("RADARR_UI_HISTORY_PAGES", "5"))))
 MAX_OUTPUT = 50000
+CONTROL_FILE = os.environ.get("SMART_OPTIMIZER_CONTROL", os.path.join(BASE_DIR, "smart-optimizer-control.json"))
+SONARR_OPTIMIZER = os.environ.get("SONARR_OPTIMIZER_SCRIPT", os.path.join(BASE_DIR, "sonarr-smart-optimizer.py"))
+RADARR_BASE_BUDGET = int(os.environ.get("RADARR_DAILY_SEARCH_BUDGET", "300"))
+SONARR_BASE_BUDGET = int(os.environ.get("SONARR_DAILY_SEARCH_BUDGET", "400"))
+
+def load_controls():
+    try:
+        with open(CONTROL_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def save_controls(data):
+    os.makedirs(os.path.dirname(CONTROL_FILE), exist_ok=True)
+    tmp = CONTROL_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+    os.replace(tmp, CONTROL_FILE)
+
+def app_controls(app):
+    data = load_controls()
+    c = data.get(app, {})
+    today = time.strftime("%Y-%m-%d")
+    return float(c.get("min_saving_percent", 5.0)), float(c.get("max_saving_percent", 50.0)), int((c.get("daily_extra") or {}).get(today, 0))
+
+def update_saving_window(app, minimum, maximum):
+    if not (0 <= minimum <= maximum <= 100):
+        raise ValueError("Use 0-100%, and minimum cannot be greater than maximum.")
+    data = load_controls(); c = data.setdefault(app, {})
+    c["min_saving_percent"] = minimum; c["max_saving_percent"] = maximum
+    save_controls(data)
+
+def add_daily_extra(app, amount=50):
+    data = load_controls(); c = data.setdefault(app, {}); extras = c.setdefault("daily_extra", {})
+    today = time.strftime("%Y-%m-%d")
+    extras[today] = int(extras.get(today, 0)) + amount
+    # Old overrides are irrelevant; prune them so the file stays tiny.
+    c["daily_extra"] = {today: extras[today]}
+    save_controls(data)
+    return extras[today]
 
 job_lock = threading.Lock()
 job = {"running": False, "mode": None, "started": None, "finished": None, "returncode": None, "output": ""}
@@ -316,15 +357,19 @@ def gib(n):
     return n / (1024.0 ** 3)
 
 
-def run_optimizer(live):
+def run_optimizer(live, app="radarr", searches_per_run=None):
     with job_lock:
         if job["running"]:
             return False
-        job.update(running=True, mode="live" if live else "dry-run", started=time.time(),
+        job.update(running=True, mode=("%s %s" % (app, "live" if live else "dry-run")), started=time.time(),
                    finished=None, returncode=None, output="")
     def worker():
-        cmd = ["python3", OPTIMIZER] + (["--live"] if live else [])
+        script = OPTIMIZER if app == "radarr" else SONARR_OPTIMIZER
+        cmd = ["python3", script] + (["--live"] if live else [])
         env = os.environ.copy()
+        env["SMART_OPTIMIZER_CONTROL"] = CONTROL_FILE
+        if searches_per_run:
+            env["RADARR_SEARCHES_PER_RUN" if app == "radarr" else "SONARR_SEARCHES_PER_RUN"] = str(searches_per_run)
         try:
             proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                   text=True, env=env, timeout=60 * 60)
@@ -368,7 +413,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px 17p
 .sidecontent{padding:16px}.metricline{display:flex;align-items:center;justify-content:space-between;padding:11px 0;border-bottom:1px solid #202731;font-size:.78rem}.metricline:last-child{border-bottom:0}.metricline span:first-child{color:var(--muted)}.metricline b{font-size:.8rem}
 pre{margin:0;white-space:pre-wrap;word-break:break-word;max-height:305px;overflow:auto;background:#0c1117;padding:15px 17px;color:#bbc5d3;font:11.5px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace}
 .footer{padding-top:22px;text-align:center;font-size:.68rem;color:#4c5667}
-.toolbar{display:flex;gap:10px;align-items:center;margin-bottom:16px}.searchbox{position:relative;flex:1}.searchbox input{width:100%;height:40px;border-radius:10px;border:1px solid var(--line);background:#0f141b;color:var(--text);padding:0 14px 0 38px;outline:none;font-size:.8rem}.searchbox input:focus{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.10)}.searchicon{position:absolute;left:13px;top:10px;color:#64748b}.queueitem{padding:14px 17px;border-bottom:1px solid #1f2630}.queueitem.extra{display:none}.queueitem:last-child{border-bottom:0}.qtop{display:flex;justify-content:space-between;gap:12px;align-items:center}.qtitle{font-size:.8rem;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.qmeta{font-size:.7rem;color:var(--muted);margin-top:5px}.progress{height:5px;background:#0b1016;border-radius:99px;overflow:hidden;margin-top:10px}.progress span{display:block;height:100%;background:linear-gradient(90deg,#3b82f6,#8b5cf6);border-radius:99px}.attention{color:var(--warn)}.empty{padding:22px 17px;color:var(--muted);font-size:.78rem}.expandbar{width:100%;height:38px;border:0;border-top:1px solid var(--line);border-radius:0;background:#10161e;color:#9aa6b7;font-size:.74rem;box-shadow:none}.expandbar:hover:not(:disabled){transform:none;background:#151c26;color:#e5e7eb}.sectiontabs{display:flex;gap:5px;margin-bottom:12px}.tab{font-size:.72rem;padding:6px 9px;border-radius:8px;background:#10151d;border:1px solid var(--line);color:#8e99aa}.tab.active{color:#e5e7eb;background:#17202c}.kpi{font-size:.66rem;color:#667085;text-transform:uppercase;letter-spacing:.08em}
+.toolbar{display:flex;gap:10px;align-items:center;margin-bottom:16px}.searchbox{position:relative;flex:1}.searchbox input{width:100%;height:40px;border-radius:10px;border:1px solid var(--line);background:#0f141b;color:var(--text);padding:0 14px 0 38px;outline:none;font-size:.8rem}.searchbox input:focus{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.10)}.searchicon{position:absolute;left:13px;top:10px;color:#64748b}.queueitem{padding:14px 17px;border-bottom:1px solid #1f2630}.queueitem.extra{display:none}.queueitem:last-child{border-bottom:0}.qtop{display:flex;justify-content:space-between;gap:12px;align-items:center}.qtitle{font-size:.8rem;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.qmeta{font-size:.7rem;color:var(--muted);margin-top:5px}.progress{height:5px;background:#0b1016;border-radius:99px;overflow:hidden;margin-top:10px}.progress span{display:block;height:100%;background:linear-gradient(90deg,#3b82f6,#8b5cf6);border-radius:99px}.attention{color:var(--warn)}.empty{padding:22px 17px;color:var(--muted);font-size:.78rem}.expandbar{width:100%;height:38px;border:0;border-top:1px solid var(--line);border-radius:0;background:#10161e;color:#9aa6b7;font-size:.74rem;box-shadow:none}.expandbar:hover:not(:disabled){transform:none;background:#151c26;color:#e5e7eb}.controlbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 16px}.controlbox{display:flex;gap:7px;align-items:center;padding:7px 9px;border:1px solid var(--line);border-radius:10px;background:#10151d}.controlbox label{font-size:.7rem;color:var(--muted)}.controlbox input{width:62px;height:32px;border:1px solid #303947;border-radius:7px;background:#0b1016;color:var(--text);padding:0 8px}.controlbox button{height:32px}.sectiontabs{display:flex;gap:5px;margin-bottom:12px}.tab{font-size:.72rem;padding:6px 9px;border-radius:8px;background:#10151d;border:1px solid var(--line);color:#8e99aa}.tab.active{color:#e5e7eb;background:#17202c}.kpi{font-size:.66rem;color:#667085;text-transform:uppercase;letter-spacing:.08em}
 @media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}.layout{grid-template-columns:1fr}.hero{align-items:flex-start;flex-direction:column}.topbar{align-items:flex-start;flex-direction:column}.nav{width:100%;justify-content:space-between}}
 @media(max-width:520px){.shell{padding:22px 14px 40px}.grid{grid-template-columns:1fr}.hero h2{font-size:1.45rem}th,td{padding:11px 12px}}
 """
@@ -377,6 +422,7 @@ def page():
     state = load_state()
     today = time.strftime("%Y-%m-%d")
     used = int((state.get("daily") or {}).get(today, {}).get("searches", 0))
+    rule_min, rule_max, extra_today = app_controls("radarr")
     error = ""
     try:
         records = history_records()
@@ -420,9 +466,15 @@ def page():
         qrows += """<button type="button" class="expandbar" id="queueExpand" onclick="toggleQueue()">Show %d more downloads ↓</button>""" % (min(len(queue), 20) - 4)
 
     actions = """<div class="actions">
+      <form method="post" action="/action"><input type="hidden" name="app" value="radarr"><input type="hidden" name="action" value="run"><button %s>Run now</button></form>
+      <form method="post" action="/action" onsubmit="return confirm('Allow 50 additional Radarr searches today and run now?')"><input type="hidden" name="app" value="radarr"><input type="hidden" name="action" value="extra50"><button %s>+50 today</button></form>
+      </div><form class="controlbar" method="post" action="/settings"><input type="hidden" name="app" value="radarr"><div class="controlbox"><label>Downsize</label><input name="min" type="number" min="0" max="100" step="0.1" value="%.1f"><span>–</span><input name="max" type="number" min="0" max="100" step="0.1" value="%.1f"><span>%%</span><button type="submit">Apply</button></div><span class="badge">%d/%d searches · +%d today</span></form><div class="actions" style="display:none">
       <form method="post" action="/run"><input type="hidden" name="mode" value="dry"><button %s>Dry run</button></form>
       <form method="post" action="/run"><input type="hidden" name="mode" value="live"><button class="live" %s>Optimize now</button></form>
       </div>""" % ("" if ENABLE_ACTIONS and not snap["running"] else "disabled",
+                    "" if ENABLE_ACTIONS and not snap["running"] else "disabled",
+                    rule_min, rule_max, used, RADARR_BASE_BUDGET + extra_today, extra_today,
+                    "" if ENABLE_ACTIONS and not snap["running"] else "disabled",
                     "" if ENABLE_ACTIONS and not snap["running"] else "disabled")
     output = html.escape(snap.get("output") or "No UI-started run yet.")
     status = "Running %s…" % snap["mode"] if snap["running"] else "Idle"
@@ -483,6 +535,7 @@ def sonarr_page():
     state = load_sonarr_state()
     today = time.strftime("%Y-%m-%d")
     used = int((state.get("daily") or {}).get(today, {}).get("searches", 0))
+    rule_min, rule_max, extra_today = app_controls("sonarr")
     error = ""
     try:
         records = sonarr_history_records()
@@ -514,7 +567,7 @@ def sonarr_page():
     err = ("<div class='notice bad'>Sonarr API error: %s</div>" % html.escape(error)) if error else ""
     return """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sonarr Smart Optimizer</title><style>%s</style></head><body><div class="shell">
 <div class="topbar"><div class="brand"><div class="mark">S</div><div class="brandcopy"><h1>Sonarr Smart Optimizer</h1><div>Episode optimization dashboard</div></div></div><div class="nav"><div class="appswitch"><a href="/radarr">Radarr</a><a class="active" href="/sonarr">Sonarr</a></div><span class="status"><span class="dot"></span>Idle</span></div></div>
-<div class="hero"><div><h2>Overview</h2><p>See episode savings, active downloads and optimizer activity in one place.</p></div></div>%s
+<div class="hero"><div><h2>Overview</h2><p>See episode savings, active downloads and optimizer activity in one place.</p></div><div class="actions"><form method="post" action="/action"><input type="hidden" name="app" value="sonarr"><input type="hidden" name="action" value="run"><button>Run now</button></form><form method="post" action="/action" onsubmit="return confirm('Allow 50 additional Sonarr searches today and run now?')"><input type="hidden" name="app" value="sonarr"><input type="hidden" name="action" value="extra50"><button>+50 today</button></form></div></div><form class="controlbar" method="post" action="/settings"><input type="hidden" name="app" value="sonarr"><div class="controlbox"><label>Downsize</label><input name="min" type="number" min="0" max="100" step="0.1" value="%.1f"><span>–</span><input name="max" type="number" min="0" max="100" step="0.1" value="%.1f"><span>%%</span><button type="submit">Apply</button></div><span class="badge">%d/%d searches · +%d today</span><span class="badge">UHD 1080→2160 exception unchanged</span></form>%s
 <div class="grid"><div class="stat"><div class="stathead"><span><span class="mini">↘</span>Storage saved</span></div><div class="value %s">%+.2f GiB</div><div class="sub">Observed across loaded Sonarr upgrade history</div></div>
 <div class="stat"><div class="stathead"><span><span class="mini">✓</span>Space reductions</span></div><div class="value">%d</div><div class="sub">Episode replacements that ended smaller</div></div>
 <div class="stat"><div class="stathead"><span><span class="mini">↓</span>Active downloads</span></div><div class="value">%d</div><div class="sub">Current Sonarr queue</div></div>
@@ -522,7 +575,7 @@ def sonarr_page():
 <div class="layout"><div><div class="panel"><div class="panelhead"><div><h3>Recent episode changes</h3><p>Observed Sonarr upgrade pairs; not all are necessarily optimizer-triggered.</p></div><span class="badge">HISTORY</span></div><table><thead><tr><th>Release</th><th>Before</th><th>After</th><th>Change</th></tr></thead><tbody>%s</tbody></table></div></div>
 <div><div class="panel"><div class="panelhead"><div><h3>Download radar</h3><p>Live Sonarr queue.</p></div><span class="badge">%d ACTIVE</span></div>%s</div></div></div>
 <div class="footer"><a href="/">Smart Optimizer</a> · Sonarr dashboard</div></div></body></html>""" % (
-        CSS, err, "good" if saved >= 0 else "bad", gib(saved), positive, len(queue), used, rows, len(queue), qrows)
+        CSS, rule_min, rule_max, used, SONARR_BASE_BUDGET + extra_today, extra_today, err, "good" if saved >= 0 else "bad", gib(saved), positive, len(queue), used, rows, len(queue), qrows)
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -546,6 +599,29 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = min(int(self.headers.get("Content-Length", "0")), 4096)
         form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"))
+        if self.path == "/settings":
+            if not ENABLE_ACTIONS:
+                self.send_error(403); return
+            app = (form.get("app") or [""])[0]
+            if app not in ("radarr", "sonarr"):
+                self.send_error(400); return
+            try:
+                update_saving_window(app, float((form.get("min") or [""])[0]), float((form.get("max") or [""])[0]))
+            except Exception as exc:
+                self.send_error(400, str(exc)); return
+            self.send_response(303); self.send_header("Location", "/" + app); self.end_headers(); return
+        if self.path == "/action":
+            if not ENABLE_ACTIONS:
+                self.send_error(403); return
+            app = (form.get("app") or [""])[0]; action = (form.get("action") or [""])[0]
+            if app not in ("radarr", "sonarr") or action not in ("run", "extra50"):
+                self.send_error(400); return
+            if action == "extra50":
+                add_daily_extra(app, 50)
+                run_optimizer(True, app, 50)
+            else:
+                run_optimizer(True, app)
+            self.send_response(303); self.send_header("Location", "/" + app); self.end_headers(); return
         if self.path == "/repair-import":
             try:
                 repair_import((form.get("queue_id") or [""])[0])
