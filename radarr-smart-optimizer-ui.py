@@ -126,31 +126,36 @@ def run_optimizer(live):
 
 CSS = """
 *{box-sizing:border-box}
-:root{color-scheme:dark;--bg:#070b14;--surface:rgba(17,24,39,.72);--surface2:rgba(30,41,59,.62);--line:rgba(148,163,184,.14);--text:#f8fafc;--muted:#94a3b8;--accent:#8b5cf6;--accent2:#22d3ee;--good:#34d399;--bad:#fb7185}
-html{background:var(--bg)}
-body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--text);margin:0;min-height:100vh;background:radial-gradient(circle at 10% 0%,rgba(139,92,246,.17),transparent 34rem),radial-gradient(circle at 90% 8%,rgba(34,211,238,.12),transparent 30rem),linear-gradient(180deg,#080d18 0%,#070b14 65%)}
-body:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.16;background-image:linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px);background-size:32px 32px;mask-image:linear-gradient(to bottom,black,transparent 70%)}
-main{position:relative;max-width:1180px;margin:auto;padding:42px 28px 60px}
-.top{display:flex;justify-content:space-between;gap:24px;align-items:center;margin-bottom:28px}
-.brand{display:flex;gap:15px;align-items:center}.logo{width:48px;height:48px;border-radius:15px;display:grid;place-items:center;font-size:24px;background:linear-gradient(135deg,rgba(139,92,246,.95),rgba(34,211,238,.85));box-shadow:0 12px 35px rgba(34,211,238,.12),inset 0 1px rgba(255,255,255,.3)}
-h1{font-size:clamp(1.65rem,3vw,2.35rem);letter-spacing:-.045em;margin:0 0 4px;font-weight:780}h2{font-size:1rem;margin:0;letter-spacing:-.02em}
-.muted{color:var(--muted)}.eyebrow{text-transform:uppercase;letter-spacing:.14em;font-size:.68rem;font-weight:750;color:#a5b4fc;margin-bottom:6px}
-.status{display:inline-flex;align-items:center;gap:8px;padding:9px 13px;border:1px solid var(--line);background:rgba(15,23,42,.65);backdrop-filter:blur(16px);border-radius:999px;font-size:.82rem;color:#cbd5e1}.dot{width:8px;height:8px;border-radius:50%;background:var(--good);box-shadow:0 0 14px var(--good)}
-.actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}.actions form{margin:0}
-button{appearance:none;border:1px solid rgba(255,255,255,.12);border-radius:11px;padding:10px 14px;font-weight:700;cursor:pointer;color:white;background:linear-gradient(180deg,rgba(99,102,241,.95),rgba(79,70,229,.9));box-shadow:0 8px 24px rgba(79,70,229,.18);transition:.18s ease}
-button:hover:not(:disabled){transform:translateY(-1px);filter:brightness(1.08)}button.live{background:linear-gradient(180deg,#f43f5e,#be123c);box-shadow:0 8px 24px rgba(244,63,94,.15)}button:disabled{opacity:.35;cursor:not-allowed;box-shadow:none}
-.notice{margin:0 0 18px;padding:11px 14px;border:1px solid var(--line);border-radius:11px;background:rgba(15,23,42,.48);font-size:.82rem;color:var(--muted)}
-.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:0 0 18px}
-.card,.panel{position:relative;overflow:hidden;background:linear-gradient(145deg,rgba(30,41,59,.72),rgba(15,23,42,.66));border:1px solid var(--line);border-radius:18px;box-shadow:0 18px 50px rgba(0,0,0,.18);backdrop-filter:blur(18px)}
-.card{padding:20px;min-height:145px}.card:after{content:"";position:absolute;width:110px;height:110px;border-radius:50%;right:-48px;top:-52px;background:radial-gradient(circle,rgba(139,92,246,.18),transparent 70%)}
-.label{display:flex;align-items:center;gap:8px;font-size:.78rem;font-weight:650;color:#a8b3c7}.icon{width:28px;height:28px;border-radius:9px;display:grid;place-items:center;background:rgba(148,163,184,.09);font-size:.85rem}
-.big{font-size:2rem;line-height:1.05;font-weight:790;letter-spacing:-.045em;margin-top:18px}.good{color:var(--good)}.bad{color:var(--bad)}.note{font-size:.78rem;line-height:1.5}.sub{margin-top:7px}
-.panel{padding:0;margin-top:14px}.panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;padding:20px 20px 14px}.panel-head p{margin:5px 0 0}.pill{padding:6px 9px;border:1px solid var(--line);border-radius:999px;color:#a5b4fc;background:rgba(99,102,241,.08);font-size:.7rem;font-weight:700;white-space:nowrap}
-.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:13px 20px;border-top:1px solid var(--line);font-size:.84rem}th{color:#64748b;text-transform:uppercase;letter-spacing:.08em;font-size:.65rem;font-weight:750;background:rgba(2,6,23,.16)}td:first-child{max-width:560px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-pre{margin:0;border-top:1px solid var(--line);white-space:pre-wrap;word-break:break-word;max-height:330px;overflow:auto;background:rgba(2,6,23,.42);padding:18px 20px;color:#cbd5e1;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace}
-code{color:#c4b5fd}.footer{text-align:center;color:#475569;font-size:.72rem;margin-top:24px}
-@media(max-width:850px){.cards{grid-template-columns:repeat(2,1fr)}.top{align-items:flex-start;flex-direction:column}.actions{justify-content:flex-start}}
-@media(max-width:520px){main{padding:25px 15px 40px}.cards{grid-template-columns:1fr}.card{min-height:125px}.panel-head{flex-direction:column}.big{font-size:1.8rem}th,td{padding:12px 14px}}
+:root{color-scheme:dark;--bg:#0b0e13;--panel:#121720;--panel2:#161c26;--line:#242b36;--text:#f3f4f6;--muted:#8993a4;--accent:#7dd3fc;--accent2:#a78bfa;--good:#86efac;--bad:#fda4af;--warn:#fde68a}
+html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text)}
+body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(circle at 18% -10%,rgba(59,130,246,.10),transparent 32rem),radial-gradient(circle at 90% 0%,rgba(168,85,247,.08),transparent 28rem),var(--bg)}
+a{color:inherit}
+.shell{max-width:1220px;margin:0 auto;padding:30px 28px 54px}
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:28px}
+.brand{display:flex;align-items:center;gap:13px}.mark{width:42px;height:42px;border-radius:12px;display:grid;place-items:center;font-size:20px;font-weight:800;background:linear-gradient(145deg,#2563eb,#7c3aed);box-shadow:inset 0 1px rgba(255,255,255,.22),0 8px 24px rgba(37,99,235,.18)}
+.brandcopy h1{margin:0;font-size:1.15rem;letter-spacing:-.025em}.brandcopy div{font-size:.76rem;color:var(--muted);margin-top:2px}
+.nav{display:flex;align-items:center;gap:8px}.navchip,.status{height:34px;display:inline-flex;align-items:center;gap:8px;padding:0 11px;border-radius:9px;border:1px solid var(--line);background:#10151d;color:#b8c0cc;font-size:.76rem}
+.dot{width:7px;height:7px;border-radius:999px;background:var(--good);box-shadow:0 0 10px rgba(134,239,172,.55)}
+.hero{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;margin-bottom:18px}
+.hero h2{font-size:1.75rem;line-height:1.1;letter-spacing:-.04em;margin:0 0 7px}.hero p{margin:0;color:var(--muted);font-size:.86rem}
+.actions{display:flex;gap:8px;flex-wrap:wrap}.actions form{margin:0}
+button{height:36px;padding:0 13px;border-radius:9px;border:1px solid #334155;background:#172033;color:#e5e7eb;font-weight:700;font-size:.78rem;cursor:pointer}
+button:hover:not(:disabled){background:#1d2940}button.live{background:#2a1720;border-color:#5f2437;color:#fecdd3}button.live:hover:not(:disabled){background:#351b27}button:disabled{opacity:.38;cursor:not-allowed}
+.notice{margin:0 0 16px;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:#10151d;color:var(--muted);font-size:.78rem}.notice.bad{color:var(--bad)}
+.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:16px}
+.stat{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:13px;padding:16px;min-height:120px}
+.stathead{display:flex;align-items:center;justify-content:space-between;gap:12px;color:#aab3c1;font-size:.75rem}.stathead span:first-child{display:flex;align-items:center;gap:8px}.mini{width:24px;height:24px;border-radius:7px;display:grid;place-items:center;background:#0f141c;border:1px solid #222a35;color:#cbd5e1;font-size:.74rem}
+.value{font-size:1.85rem;font-weight:760;letter-spacing:-.045em;margin-top:18px}.good{color:var(--good)}.bad{color:var(--bad)}.muted{color:var(--muted)}.sub{font-size:.73rem;color:var(--muted);margin-top:6px}
+.layout{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(280px,.8fr);gap:16px}
+.panel{background:linear-gradient(180deg,#141a23,#10151c);border:1px solid var(--line);border-radius:13px;overflow:hidden}
+.panel+.panel{margin-top:16px}.layout .panel+.panel{margin-top:0}
+.panelhead{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;padding:16px 17px 13px;border-bottom:1px solid var(--line)}.panelhead h3{font-size:.9rem;margin:0;letter-spacing:-.015em}.panelhead p{font-size:.73rem;color:var(--muted);margin:4px 0 0}.badge{font-size:.64rem;padding:5px 7px;border-radius:999px;border:1px solid #2a3340;color:#93a4b8;background:#0e131a;white-space:nowrap}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px 17px;border-bottom:1px solid #1f2630;font-size:.79rem}th{font-size:.62rem;color:#667085;text-transform:uppercase;letter-spacing:.09em;background:#0f141b}tr:last-child td{border-bottom:0}td:first-child{max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sidecontent{padding:16px}.metricline{display:flex;align-items:center;justify-content:space-between;padding:11px 0;border-bottom:1px solid #202731;font-size:.78rem}.metricline:last-child{border-bottom:0}.metricline span:first-child{color:var(--muted)}.metricline b{font-size:.8rem}
+pre{margin:0;white-space:pre-wrap;word-break:break-word;max-height:305px;overflow:auto;background:#0c1117;padding:15px 17px;color:#bbc5d3;font:11.5px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace}
+.footer{padding-top:22px;text-align:center;font-size:.68rem;color:#4c5667}
+@media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}.layout{grid-template-columns:1fr}.hero{align-items:flex-start;flex-direction:column}.topbar{align-items:flex-start;flex-direction:column}.nav{width:100%;justify-content:space-between}}
+@media(max-width:520px){.shell{padding:22px 14px 40px}.grid{grid-template-columns:1fr}.hero h2{font-size:1.45rem}th,td{padding:11px 12px}}
 """
 
 def page():
@@ -166,10 +171,13 @@ def page():
         error = str(exc)
     saved = sum(x["saved"] for x in upgrades)
     positive = sum(1 for x in upgrades if x["saved"] > 0)
+    total_before = sum(x["old"] for x in upgrades)
+    reduction_pct = (saved / total_before * 100.0) if total_before else 0.0
+    last_date = upgrades[0]["date"][:10] if upgrades else "—"
     with job_lock:
         snap = dict(job)
     rows = ""
-    for x in upgrades[:20]:
+    for x in upgrades[:12]:
         delta = gib(x["saved"])
         cls = "good" if delta >= 0 else "bad"
         rows += "<tr><td>%s</td><td>%.2f GiB</td><td>%.2f GiB</td><td class='%s'>%+.2f GiB</td></tr>" % (
@@ -185,23 +193,43 @@ def page():
            "" if ENABLE_ACTIONS and not snap["running"] else "disabled")
     output = html.escape(snap.get("output") or "No UI-started run yet.")
     status = "Running %s…" % snap["mode"] if snap["running"] else "Idle"
-    warning = "" if ENABLE_ACTIONS else "<div class='notice'>Dashboard is in <strong>read-only mode</strong>. Optimizer actions stay disabled until explicitly enabled.</div>"
+    warning = "" if ENABLE_ACTIONS else "<div class='notice'>Read-only mode is active. Optimizer actions are disabled.</div>"
     err = ("<div class='notice bad'>Radarr history error: %s</div>" % html.escape(error)) if error else ""
-    return """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#070b14"><title>Radarr Smart Optimizer</title><style>%s</style></head>
-<body><main>
-<div class="top"><div class="brand"><div class="logo">✦</div><div><div class="eyebrow">Library intelligence</div><h1>Radarr Smart Optimizer</h1><div class="muted note">A quiet overview of what your optimizer is doing.</div></div></div><div><div class="status"><span class="dot"></span>%s</div>%s</div></div>
+    return """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0b0e13"><title>Radarr Smart Optimizer</title><style>%s</style></head>
+<body><div class="shell">
+<div class="topbar"><div class="brand"><div class="mark">R</div><div class="brandcopy"><h1>Radarr Smart Optimizer</h1><div>Library optimization dashboard</div></div></div>
+<div class="nav"><span class="navchip">Overview</span><span class="status"><span class="dot"></span>%s</span></div></div>
+<div class="hero"><div><h2>Overview</h2><p>Storage savings, completed upgrades and optimizer activity at a glance.</p></div>%s</div>
 %s%s
-<div class="cards">
-<div class="card"><div class="label"><span class="icon">↘</span>Storage saved</div><div class="big %s">%+.2f GiB</div><div class="note muted sub">Observed across loaded upgrades</div></div>
-<div class="card"><div class="label"><span class="icon">✓</span>Optimized</div><div class="big">%d</div><div class="note muted sub">%d upgrades reduced storage</div></div>
-<div class="card"><div class="label"><span class="icon">⌕</span>Searches today</div><div class="big">%d</div><div class="note muted sub">Optimizer state counter</div></div>
-<div class="card"><div class="label"><span class="icon">◉</span>Engine</div><div class="big" style="font-size:1.45rem">%s</div><div class="note muted sub">Scheduled optimizer runs independently</div></div>
+<div class="grid">
+<div class="stat"><div class="stathead"><span><span class="mini">↘</span>Storage saved</span></div><div class="value %s">%+.2f GiB</div><div class="sub">Across loaded upgrade history</div></div>
+<div class="stat"><div class="stathead"><span><span class="mini">✓</span>Optimized</span></div><div class="value">%d</div><div class="sub">%d upgrades reduced storage</div></div>
+<div class="stat"><div class="stathead"><span><span class="mini">⌕</span>Searches today</span></div><div class="value">%d</div><div class="sub">From optimizer state</div></div>
+<div class="stat"><div class="stathead"><span><span class="mini">◉</span>Engine</span></div><div class="value" style="font-size:1.35rem">%s</div><div class="sub">Scheduled optimizer runs independently</div></div>
 </div>
-<div class="panel"><div class="panel-head"><div><h2>Recent optimizations</h2><p class="note muted">Completed Radarr upgrade pairs with their real file-size change.</p></div><span class="pill">RADARR HISTORY</span></div>
-<div class="table-wrap"><table><thead><tr><th>Release</th><th>Before</th><th>After</th><th>Saved</th></tr></thead><tbody>%s</tbody></table></div></div>
-<div class="panel"><div class="panel-head"><div><h2>Optimizer activity</h2><p class="note muted">Output from runs started through this dashboard.</p></div><span class="pill">LIVE LOG</span></div><pre>%s</pre></div>
-<div class="footer">Radarr Smart Optimizer · lightweight optional dashboard</div>
-</main></body></html>""" % (CSS, html.escape(status), actions, warning, err, "good" if saved >= 0 else "bad", gib(saved), len(upgrades), positive, used, html.escape(status), rows, output)
+<div class="layout">
+<div>
+<div class="panel"><div class="panelhead"><div><h3>Recent optimizations</h3><p>Completed Radarr upgrade pairs and their real file-size change.</p></div><span class="badge">RADARR HISTORY</span></div>
+<table><thead><tr><th>Release</th><th>Before</th><th>After</th><th>Saved</th></tr></thead><tbody>%s</tbody></table></div>
+<div class="panel"><div class="panelhead"><div><h3>Optimizer activity</h3><p>Output from runs started through this dashboard.</p></div><span class="badge">ACTIVITY</span></div><pre>%s</pre></div>
+</div>
+<div class="panel"><div class="panelhead"><div><h3>Library impact</h3><p>Quick context from loaded history.</p></div><span class="badge">SUMMARY</span></div>
+<div class="sidecontent">
+<div class="metricline"><span>Net reduction</span><b class="%s">%.1f%%</b></div>
+<div class="metricline"><span>Successful reductions</span><b>%d / %d</b></div>
+<div class="metricline"><span>Last observed upgrade</span><b>%s</b></div>
+<div class="metricline"><span>History window</span><b>%d page%s</b></div>
+<div class="metricline"><span>UI mode</span><b>%s</b></div>
+</div></div>
+</div>
+<div class="footer">Radarr Smart Optimizer · optional lightweight overview</div>
+</div></body></html>""" % (
+        CSS, html.escape(status), actions, warning, err,
+        "good" if saved >= 0 else "bad", gib(saved),
+        len(upgrades), positive, used, html.escape(status), rows, output,
+        "good" if reduction_pct >= 0 else "bad", reduction_pct,
+        positive, len(upgrades), html.escape(last_date), HISTORY_PAGES,
+        "" if HISTORY_PAGES == 1 else "s", "Actions enabled" if ENABLE_ACTIONS else "Read-only")
 
 
 class Handler(BaseHTTPRequestHandler):
