@@ -49,7 +49,8 @@ UHD_PROFILE_ID = 5
 
 DAILY_SEARCH_BUDGET = 300
 MIN_SEEDERS = 1
-MIN_SAVING_PERCENT = 5.0
+MIN_SAVING_PERCENT = float(os.environ.get("RADARR_MIN_SAVING_PERCENT", "5.0"))
+MAX_SAVING_PERCENT = float(os.environ.get("RADARR_MAX_SAVING_PERCENT", "50.0"))
 
 
 # Don't deliberately grab the exact same release again for this long
@@ -60,10 +61,6 @@ ATTEMPT_COOLDOWN_DAYS = 365
 LARGE_1080P_MIB = 1800
 COMPACT_1080P_X265_MIB = 1200
 LARGE_2160P_MIB = 6000
-
-# Hard ceiling for a 1080p -> 2160p resolution upgrade.
-# 8 GiB = 8192 MiB.
-MAX_4K_UPGRADE_MIB = 8192
 
 LIVE = "--live" in sys.argv
 
@@ -770,20 +767,15 @@ def evaluate_release(item, release, state):
     candidate_mib = mib(size_bytes)
     current_mib = item["size_mib"]
 
-    if candidate_resolution > current_resolution and candidate_mib > MAX_4K_UPGRADE_MIB:
-        return None, "4K upgrade exceeds size ceiling"
-
     saving = ((current_mib - candidate_mib) / current_mib) * 100.0
 
-    # Optimization policy:
-    # - Same resolution must meaningfully reduce storage.
-    # - A real 1080p -> 2160p resolution upgrade may be larger, but only within
-    #   the strict 4K ceiling above and while preserving HDR/DV/audio rules.
-    # - We never accept a same-resolution candidate merely because Radarr ranks
-    #   its source/quality label higher.
-    if candidate_resolution == current_resolution:
-        if saving < MIN_SAVING_PERCENT:
-            return None, "same-resolution candidate does not save enough space"
+    # Storage-first policy applies to EVERY replacement, including 1080p -> 2160p.
+    # A candidate must save meaningful space, but an extreme reduction is rejected
+    # as a compression/quality-risk guardrail.
+    if saving < MIN_SAVING_PERCENT:
+        return None, "candidate does not save enough space"
+    if saving > MAX_SAVING_PERCENT:
+        return None, "candidate saves too much space (quality-risk guardrail)"
 
     candidate_codec = codec_from_text(title)
     candidate_channels = audio_channels_from_text(title)
@@ -1074,7 +1066,7 @@ def main():
         print("MODE: DRY RUN -- NO RELEASES WILL BE GRABBED")
 
     print("Daily interactive-search budget:", DAILY_SEARCH_BUDGET)
-    print("Minimum same-resolution saving: %.1f%%" % MIN_SAVING_PERCENT)
+    print("Allowed saving window: %.1f%% to %.1f%%" % (MIN_SAVING_PERCENT, MAX_SAVING_PERCENT))
     print()
 
     used = searches_used_today(state)
