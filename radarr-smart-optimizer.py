@@ -782,13 +782,11 @@ def evaluate_release(item, release, state):
     candidate_atmos = radarr_candidate_atmos(title)
     candidate_dr = radarr_candidate_dynamic_range(title)
 
-    # 4K Dolby Vision must explicitly include HDR fallback and be 10-25 GiB.
+    # 4K Dolby Vision must explicitly include HDR fallback.
+    # Size safety is handled by the relative MIN/MAX saving window above,
+    # rather than a fixed GiB range that cannot scale with the current file.
     if candidate_resolution == 2160 and candidate_dr == "DV_ONLY":
         return None, "4K DV without HDR fallback"
-    if candidate_resolution == 2160 and candidate_dr == "DV_HDR":
-        gib = size_bytes / float(1024 ** 3)
-        if gib < 10 or gib > 25:
-            return None, "4K DV HDR outside 10-25 GiB"
 
     if not radarr_dynamic_range_allowed(item["dynamic_range"], candidate_dr):
         return None, "dynamic range protection"
