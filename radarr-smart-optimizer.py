@@ -17,8 +17,8 @@ from datetime import datetime, timezone
 # Live    = --live
 #
 # IMPORTANT:
-# - NEVER deletes media files
-# - NEVER calls Radarr DELETE endpoints
+# - This script NEVER calls Radarr DELETE endpoints directly
+# - In live mode Radarr may replace an existing file after importing a selected release
 # - NEVER touches Deluge directly
 # - Radarr performs normal Completed Download Handling/import
 # - Search budgets are configurable; defaults are conservative for scheduled use
@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 # Check the URL if Radarr is not on the same machine, then review
 # SEARCHES_PER_RUN plus NORMAL_PROFILE_ID and UHD_PROFILE_ID below.
 RADARR_URL_DEFAULT = "http://127.0.0.1:7878"
-SEARCHES_PER_RUN = 50
+SEARCHES_PER_RUN = 10
 
 RADARR_URL = os.environ.get("RADARR_URL", RADARR_URL_DEFAULT).rstrip("/")
 API_KEY = os.environ.get("RADARR_KEY", "").strip()
@@ -728,13 +728,9 @@ def collect_candidates(state, queued_ids):
     movies = get("/movie")
     items = []
 
-    # Permanent hands-off list: LOTR + Hobbit trilogies.
-    ignored_tmdb = {120, 121, 122, 49051, 57158, 122917}
-
     stats = {
         "movies": len(movies),
         "with_file": 0,
-        "ignored": 0,
         "queued": 0,
         "eligible": 0,
     }
@@ -742,10 +738,6 @@ def collect_candidates(state, queued_ids):
     for movie in movies:
         movie_id = movie.get("id")
         tmdb_id = movie.get("tmdbId")
-
-        if tmdb_id in ignored_tmdb:
-            stats["ignored"] += 1
-            continue
 
         if not movie.get("hasFile"):
             continue
@@ -790,11 +782,9 @@ def collect_candidates(state, queued_ids):
 
         profile_id = movie.get("qualityProfileId")
 
-        # Never change the resolution target for normal optimization.
-        # 1080p stays 1080p; 2160p stays 2160p.
-        # A 1080p -> 2160p upgrade is only allowed separately
-        # where the existing UHD-profile rules explicitly permit it.
-        target_resolution = resolution
+        # Normal profiles keep their current resolution.
+        # UHD-profile movies may upgrade an existing 1080p file to 2160p.
+        target_resolution = 2160 if profile_id == UHD_PROFILE_ID else resolution
 
         media = movie_file.get("mediaInfo") or {}
 
@@ -856,10 +846,6 @@ def radarr_rejections_ok(release):
     return True
 
 
-def candidate_resolution(release):
-    return quality_resolution(release.get("quality"))
-
-
 
 def candidate_resolution_from_release(release):
     return quality_resolution(release.get("quality"))
@@ -912,6 +898,9 @@ def evaluate_release(item, release, state):
 
     candidate_mib = mib(size_bytes)
     current_mib = item["size_mib"]
+
+    if candidate_resolution > current_resolution and candidate_mib > MAX_4K_UPGRADE_MIB:
+        return None, "4K upgrade exceeds size ceiling"
 
     saving = ((current_mib - candidate_mib) / current_mib) * 100.0
 
@@ -1192,143 +1181,6 @@ def radarr_audio_allowed(
 
 
 
-# ============================================================
-# RADARR MEDIA PROTECTION
-# ============================================================
-
-def radarr_current_dynamic_range(movie_file):
-    media=(movie_file or {}).get("mediaInfo") or {}
-
-    dr=str(media.get("videoDynamicRange") or "").lower()
-    typ=str(media.get("videoDynamicRangeType") or "").lower()
-
-    extra=" ".join([
-        str((movie_file or {}).get("sceneName") or ""),
-        str((movie_file or {}).get("relativePath") or "")
-    ]).lower()
-
-    if (
-        "dolby vision" in typ
-        or "dovi" in typ
-        or " dv" in (" " + typ)
-        or "dv " in (typ + " ")
-        or "dolby vision" in extra
-        or "dovi" in extra
-    ):
-        return "DV_HDR"
-
-    if any(x in dr or x in typ or x in extra for x in (
-        "hdr10+",
-        "hdr10plus",
-        "hdr10",
-        "hdr",
-        "hlg"
-    )):
-        return "HDR"
-
-    return "SDR_UNKNOWN"
-
-
-def radarr_current_atmos(movie_file):
-    media=(movie_file or {}).get("mediaInfo") or {}
-
-    text=" ".join([
-        str(media.get("audioCodec") or ""),
-        str((movie_file or {}).get("sceneName") or ""),
-        str((movie_file or {}).get("relativePath") or "")
-    ]).lower()
-
-    return "atmos" in text
-
-
-def radarr_current_audio_channels(movie_file):
-    media=(movie_file or {}).get("mediaInfo") or {}
-
-    try:
-        return float(media.get("audioChannels") or 0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def radarr_candidate_atmos(title):
-    return "atmos" in str(title or "").lower()
-
-
-def radarr_candidate_dynamic_range(title):
-    t=str(title or "").lower()
-
-    dv=(
-        "dolby vision" in t
-        or "dovi" in t
-        or bool(re.search(
-            r"(?<![a-z0-9])dv(?![a-z0-9])",
-            t
-        ))
-    )
-
-    hdr=any(x in t for x in (
-        "hdr10+",
-        "hdr10plus",
-        "hdr10",
-        "hdr",
-        "hlg"
-    ))
-
-    if dv and hdr:
-        return "DV_HDR"
-
-    if dv:
-        return "DV_ONLY"
-
-    if hdr:
-        return "HDR"
-
-    return "SDR_UNKNOWN"
-
-
-def radarr_dynamic_range_allowed(current, candidate):
-    # DV without HDR fallback is never accepted.
-    if candidate == "DV_ONLY":
-        return False
-
-    # Existing DV+HDR must remain DV+HDR.
-    if current == "DV_HDR":
-        return candidate == "DV_HDR"
-
-    # Existing HDR may remain HDR or become DV+HDR.
-    if current == "HDR":
-        return candidate in ("HDR", "DV_HDR")
-
-    # SDR/unknown may move to HDR/DV or remain SDR/unknown.
-    return candidate in (
-        "SDR_UNKNOWN",
-        "HDR",
-        "DV_HDR"
-    )
-
-
-def radarr_audio_allowed(
-    current_channels,
-    current_atmos,
-    candidate_channels,
-    candidate_atmos
-):
-    # Known 5.1/7.1 can never become lower-channel audio.
-    if current_channels >= 5.0:
-        if (
-            not candidate_channels
-            or candidate_channels < current_channels
-        ):
-            return False
-
-    # Atmos may never disappear.
-    if current_atmos and not candidate_atmos:
-        return False
-
-    return True
-
-
-
 def main():
     state = load_state()
 
@@ -1343,7 +1195,7 @@ def main():
     if LIVE:
         print("MODE: LIVE")
     else:
-        print("MODE: DRY RUN -- NOTHING WILL BE DOWNLOADED")
+        print("MODE: DRY RUN -- NO RELEASES WILL BE GRABBED")
 
     print("Daily interactive-search budget:", DAILY_SEARCH_BUDGET)
     print("Minimum same-resolution saving: %.1f%%" % MIN_SAVING_PERCENT)
@@ -1401,7 +1253,6 @@ def main():
 
     print("Movies in Radarr:", stats["movies"])
     print("Movies with files:", stats["with_file"])
-    print("Permanent LOTR/Hobbit ignores:", stats["ignored"])
     print("Queued movies skipped:", stats["queued"])
 
     print()
@@ -1414,16 +1265,8 @@ def main():
         print("Nothing currently needs an optimizer search.")
         return
 
-    # Movies are already eligible local candidates.
-    # Search larger files first so successful optimizations can
-    # recover more storage early.
-    candidates.sort(
-        key=lambda x: (
-            x.get("resolution", 0),
-            x.get("size_mib", 0)
-        ),
-        reverse=True
-    )
+    # Search the highest-value optimization candidates first.
+    candidates.sort(key=priority_score, reverse=True)
 
     selected = candidates[:remaining]
 
@@ -1570,8 +1413,8 @@ def main():
     if not LIVE:
         print()
         print(
-            "DRY RUN COMPLETE -- no downloads, deletions, "
-            "or persistent cooldown changes were made."
+            "DRY RUN COMPLETE -- no releases were grabbed and "
+            "no persistent cooldown changes were made."
         )
 
 
