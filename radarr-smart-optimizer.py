@@ -178,7 +178,11 @@ def blank_state():
         "version": 1,
         "movies": {},
         "attempted_releases": {},
-        "daily": {}
+        "daily": {},
+        "movie_queue": [],
+        "movie_cursor": 0,
+        "known_movie_ids": [],
+        "queue_initialized": False
     }
 
 
@@ -194,6 +198,10 @@ def load_state():
         state.setdefault("movies", {})
         state.setdefault("attempted_releases", {})
         state.setdefault("daily", {})
+        state.setdefault("movie_queue", [])
+        state.setdefault("movie_cursor", 0)
+        state.setdefault("known_movie_ids", [])
+        state.setdefault("queue_initialized", False)
 
         return state
 
@@ -606,6 +614,114 @@ def priority_score(item):
         score -= 200000
 
     return score
+
+def initialize_movie_queue(state, movies):
+    """Create the persistent A-Z optimizer queue once."""
+    with_files = [m for m in movies if m.get("id") and m.get("hasFile")]
+    ordered = sorted(
+        with_files,
+        key=lambda m: ((m.get("title") or "").casefold(), int(m.get("id", 0)))
+    )
+    state["movie_queue"] = [
+        {
+            "movie_id": int(m["id"]),
+            "title": m.get("title") or "Unknown movie",
+            "year": m.get("year"),
+        }
+        for m in ordered
+    ]
+    state["movie_cursor"] = 0
+    state["known_movie_ids"] = [x["movie_id"] for x in state["movie_queue"]]
+    state["queue_initialized"] = True
+    save_state(state)
+    print("PERMANENT A-Z MOVIE QUEUE READY:", len(state["movie_queue"]), "movies", flush=True)
+
+
+def append_new_movies(state, movies):
+    """Append newly downloaded movies to the END; never reorder the existing queue."""
+    known = set(int(x) for x in state.get("known_movie_ids", []))
+    added = 0
+    for movie in movies:
+        mid = int(movie.get("id", 0) or 0)
+        if not mid or mid in known or not movie.get("hasFile"):
+            continue
+        state.setdefault("movie_queue", []).append({
+            "movie_id": mid,
+            "title": movie.get("title") or "Unknown movie",
+            "year": movie.get("year"),
+        })
+        known.add(mid)
+        added += 1
+        print("APPENDED NEW MOVIE TO BOTTOM:", movie.get("title"), flush=True)
+    state["known_movie_ids"] = sorted(known)
+    if added:
+        save_state(state)
+    return added
+
+
+def movie_item(movie, state, queued_ids):
+    """Return an optimizer-searchable movie item, or None without consuming search quota."""
+    movie_id = movie.get("id")
+    if not movie_id or not movie.get("hasFile") or movie_id in queued_ids:
+        return None
+
+    history = state.get("movies", {}).get(str(movie_id), {})
+    cycles = int(history.get("search_cycles", 0))
+    last_search = history.get("last_search")
+    if cycles >= 2:
+        return None
+    if cycles == 1 and last_search and age_days(last_search) < 180:
+        return None
+
+    movie_file = movie.get("movieFile") or {}
+    size_bytes = movie_file.get("size") or 0
+    if size_bytes <= 0:
+        return None
+
+    resolution = file_resolution(movie_file)
+    if resolution not in (1080, 2160):
+        return None
+
+    profile_id = movie.get("qualityProfileId")
+    target_resolution = 2160 if profile_id == UHD_PROFILE_ID else resolution
+
+    return {
+        "movie_id": movie_id,
+        "tmdb_id": movie.get("tmdbId"),
+        "title": movie.get("title") or "Unknown movie",
+        "year": movie.get("year"),
+        "profile_id": profile_id,
+        "resolution": resolution,
+        "target_resolution": target_resolution,
+        "size_bytes": size_bytes,
+        "size_mib": mib(size_bytes),
+        "codec": current_codec(movie_file),
+        "audio_channels": radarr_current_audio_channels(movie_file),
+        "atmos": radarr_current_atmos(movie_file),
+        "dynamic_range": radarr_current_dynamic_range(movie_file),
+        "movie_file": movie_file,
+    }
+
+
+def next_movie_item(state, movies_by_id, queued_ids):
+    """Advance the one persistent cursor until an eligible movie is found or queue ends."""
+    queue = state.get("movie_queue", [])
+    while int(state.get("movie_cursor", 0)) < len(queue):
+        cursor = int(state.get("movie_cursor", 0))
+        ref = queue[cursor]
+        state["movie_cursor"] = cursor + 1
+        if LIVE:
+            save_state(state)
+
+        movie = movies_by_id.get(int(ref.get("movie_id", 0)))
+        if not movie:
+            continue
+
+        item = movie_item(movie, state, queued_ids)
+        if item is not None:
+            return item
+    return None
+
 
 def collect_candidates(state, queued_ids):
     movies = get("/movie")
@@ -1128,43 +1244,21 @@ def main():
     print("Reading Radarr queue...")
 
     queued_ids = active_movie_ids()
+    movies = get("/movie")
+    movies_by_id = {int(m["id"]): m for m in movies if m.get("id")}
 
-    print(
-        "Movies currently represented in queue:",
-        len(queued_ids)
-    )
+    print("Movies currently represented in queue:", len(queued_ids))
+    print("Movies in Radarr:", len(movies))
+    print("Movies with files:", sum(1 for m in movies if m.get("hasFile")))
 
-    print()
+    if not state.get("queue_initialized") or not state.get("movie_queue"):
+        print("Creating persistent A-Z movie queue...", flush=True)
+        initialize_movie_queue(state, movies)
 
-    candidates, stats = collect_candidates(
-        state,
-        queued_ids
-    )
+    append_new_movies(state, movies)
 
-    print("Movies in Radarr:", stats["movies"])
-    print("Movies with files:", stats["with_file"])
-    print("Queued movies skipped:", stats["queued"])
-
-    print()
-    print(
-        "Eligible local optimization candidates:",
-        len(candidates)
-    )
-
-    if not candidates:
-        print("Nothing currently needs an optimizer search.")
-        return
-
-    # Search the highest-value optimization candidates first.
-    candidates.sort(key=priority_score, reverse=True)
-
-    selected = candidates[:remaining]
-
-    print()
-    print(
-        "Highest-priority movies selected for this run:",
-        len(selected)
-    )
+    print("Persistent optimizer queue:", len(state.get("movie_queue", [])))
+    print("Saved queue cursor:", state.get("movie_cursor", 0))
     print()
 
     searches = 0
@@ -1172,10 +1266,18 @@ def main():
     no_match = 0
     errors = 0
 
-    for number, item in enumerate(selected, 1):
+    number = 0
+    while searches < remaining:
+        item = next_movie_item(state, movies_by_id, queued_ids)
+        if item is None:
+            print("Reached the genuine end of the persistent movie queue.", flush=True)
+            break
+
+        number += 1
         print("-" * 68)
 
         describe_item(number, item)
+        print("    NOW CHECKING: %s (%s)" % (item.get("title", "Unknown"), item.get("year", "?")), flush=True)
 
         movie_id = item["movie_id"]
 
@@ -1187,6 +1289,7 @@ def main():
             )
 
             searches += 1
+            print("    SEARCH PROGRESS: %d / %d" % (searches, remaining), flush=True)
 
             if LIVE:
                 increment_search_count(state)
