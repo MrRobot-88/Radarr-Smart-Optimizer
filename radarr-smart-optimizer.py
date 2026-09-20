@@ -216,12 +216,13 @@ def save_state(state):
     if not LIVE:
         return
 
-    tmp = STATE_FILE + ".tmp"
-
-    with open(tmp, "w", encoding="utf-8") as f:
+    # STATE_FILE may be a Docker single-file bind mount. Replacing the inode
+    # with os.replace() can fail with EBUSY. Write in place instead, matching
+    # the production-safe Sonarr implementation.
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, sort_keys=True)
-
-    os.replace(tmp, STATE_FILE)
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def today_key():
