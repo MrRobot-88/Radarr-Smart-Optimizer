@@ -1,0 +1,652 @@
+#!/usr/bin/env python3
+"""Optional lightweight web UI for Radarr Smart Optimizer.
+
+Standard library only. The optimizer remains fully usable without this file.
+"""
+
+import html
+import json
+import os
+import subprocess
+import threading
+import time
+import urllib.parse
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+OPTIMIZER = os.environ.get("RADARR_OPTIMIZER_SCRIPT", os.path.join(BASE_DIR, "radarr-smart-optimizer.py"))
+STATE_FILE = os.environ.get("RADARR_OPTIMIZER_STATE", os.path.join(BASE_DIR, "radarr-smart-optimizer-state.json"))
+RADARR_URL = os.environ.get("RADARR_URL", "http://127.0.0.1:7878").rstrip("/")
+SONARR_URL = os.environ.get("SONARR_URL", "http://127.0.0.1:8989").rstrip("/")
+SONARR_KEY = os.environ.get("SONARR_KEY", "").strip()
+SONARR_STATE_FILE = os.environ.get("SONARR_OPTIMIZER_STATE", os.path.join(BASE_DIR, "sonarr-smart-optimizer-state.json"))
+API_KEY = os.environ.get("RADARR_KEY", "").strip()
+HOST = os.environ.get("RADARR_UI_HOST", "127.0.0.1")
+PORT = int(os.environ.get("RADARR_UI_PORT", "8788"))
+ENABLE_ACTIONS = os.environ.get("RADARR_UI_ENABLE_ACTIONS", "0").lower() in ("1", "true", "yes")
+HISTORY_PAGES = max(1, min(20, int(os.environ.get("RADARR_UI_HISTORY_PAGES", "5"))))
+MAX_OUTPUT = 50000
+CONTROL_FILE = os.environ.get("SMART_OPTIMIZER_CONTROL", os.path.join(BASE_DIR, "smart-optimizer-control.json"))
+SONARR_OPTIMIZER = os.environ.get("SONARR_OPTIMIZER_SCRIPT", os.path.join(BASE_DIR, "sonarr-smart-optimizer.py"))
+RADARR_BASE_BUDGET = int(os.environ.get("RADARR_DAILY_SEARCH_BUDGET", "300"))
+SONARR_BASE_BUDGET = int(os.environ.get("SONARR_DAILY_SEARCH_BUDGET", "400"))
+
+def load_controls():
+    try:
+        with open(CONTROL_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def save_controls(data):
+    os.makedirs(os.path.dirname(CONTROL_FILE), exist_ok=True)
+    tmp = CONTROL_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+    os.replace(tmp, CONTROL_FILE)
+
+def app_controls(app):
+    data = load_controls()
+    c = data.get(app, {})
+    today = time.strftime("%Y-%m-%d")
+    return float(c.get("min_saving_percent", 5.0)), float(c.get("max_saving_percent", 50.0)), int((c.get("daily_extra") or {}).get(today, 0))
+
+def update_saving_window(app, minimum, maximum):
+    if not (0 <= minimum <= maximum <= 100):
+        raise ValueError("Use 0-100%, and minimum cannot be greater than maximum.")
+    data = load_controls(); c = data.setdefault(app, {})
+    c["min_saving_percent"] = minimum; c["max_saving_percent"] = maximum
+    save_controls(data)
+
+def add_daily_extra(app, amount=50):
+    data = load_controls(); c = data.setdefault(app, {}); extras = c.setdefault("daily_extra", {})
+    today = time.strftime("%Y-%m-%d")
+    extras[today] = int(extras.get(today, 0)) + amount
+    # Old overrides are irrelevant; prune them so the file stays tiny.
+    c["daily_extra"] = {today: extras[today]}
+    save_controls(data)
+    return extras[today]
+
+job_lock = threading.Lock()
+job = {"running": False, "mode": None, "started": None, "finished": None, "returncode": None, "output": ""}
+
+
+def radarr_request(path, method="GET", payload=None):
+    if not API_KEY:
+        raise RuntimeError("RADARR_KEY is not configured")
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        RADARR_URL + "/api/v3" + path,
+        data=data,
+        method=method,
+        headers={"X-Api-Key": API_KEY, "Accept": "application/json",
+                 "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as response:
+        raw = response.read().decode("utf-8")
+        return json.loads(raw) if raw else {}
+
+def radarr_get(path):
+    if not API_KEY:
+        raise RuntimeError("RADARR_KEY is not configured")
+    return radarr_request(path)
+
+
+def sonarr_get(path):
+    if not SONARR_KEY:
+        raise RuntimeError("SONARR_KEY is not configured")
+    req = urllib.request.Request(
+        SONARR_URL + "/api/v3" + path,
+        headers={"X-Api-Key": SONARR_KEY, "Accept": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as response:
+        raw = response.read().decode("utf-8")
+        return json.loads(raw) if raw else {}
+
+
+def load_sonarr_state():
+    try:
+        with open(SONARR_STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"daily": {}, "episodes": {}}
+
+
+def sonarr_history_records():
+    records = []
+    for page_num in range(1, HISTORY_PAGES + 1):
+        data = sonarr_get("/history?page=%d&pageSize=100&sortKey=date&sortDirection=descending" % page_num)
+        batch = data.get("records", [])
+        records.extend(batch)
+        if len(batch) < 100:
+            break
+    return records
+
+
+def sonarr_queue_records():
+    data = sonarr_get("/queue?page=1&pageSize=100&sortKey=timeleft&sortDirection=ascending")
+    return data.get("records", [])
+
+
+def sonarr_completed_upgrades(records):
+    pending = {}
+    upgrades = []
+    for event in reversed(records):
+        episode_id = event.get("episodeId")
+        etype = event.get("eventType")
+        data = event.get("data") or {}
+        if etype == "episodeFileDeleted" and data.get("reason") == "Upgrade":
+            try:
+                pending[episode_id] = int(data.get("size") or 0)
+            except (TypeError, ValueError):
+                pass
+        elif etype == "downloadFolderImported" and episode_id in pending:
+            try:
+                new_size = int(data.get("size") or 0)
+            except (TypeError, ValueError):
+                new_size = 0
+            old_size = pending.pop(episode_id)
+            if old_size > 0 and new_size > 0:
+                upgrades.append({
+                    "date": event.get("date") or "",
+                    "title": event.get("sourceTitle") or ("Episode ID %s" % episode_id),
+                    "old": old_size, "new": new_size, "saved": old_size - new_size,
+                })
+    return sorted(upgrades, key=lambda x: x["date"], reverse=True)
+
+
+def load_state():
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"daily": {}, "movies": {}}
+
+
+def history_records():
+    records = []
+    for page in range(1, HISTORY_PAGES + 1):
+        data = radarr_get("/history?page=%d&pageSize=100&sortKey=date&sortDirection=descending" % page)
+        batch = data.get("records", [])
+        records.extend(batch)
+        if len(batch) < 100:
+            break
+    return records
+
+
+def queue_records():
+    """Return current Radarr download queue rows for the dashboard."""
+    data = radarr_get("/queue?page=1&pageSize=100&sortKey=timeleft&sortDirection=ascending")
+    return data.get("records", [])
+
+
+def queue_health(rows):
+    """Classify queue rows conservatively from Radarr's own status fields."""
+    result = []
+    for row in rows:
+        status = str(row.get("status") or "").lower()
+        tracked = str(row.get("trackedDownloadStatus") or "").lower()
+        messages = row.get("statusMessages") or []
+        message_parts = []
+        for m in messages:
+            if not isinstance(m, dict):
+                continue
+            title = str(m.get("title") or "")
+            details = m.get("messages") or []
+            if isinstance(details, list):
+                detail_text = " ".join(
+                    str(x.get("message") or "") if isinstance(x, dict) else str(x)
+                    for x in details
+                )
+            elif isinstance(details, dict):
+                detail_text = str(details.get("message") or details)
+            else:
+                detail_text = str(details)
+            message_parts.append((title + " " + detail_text).strip())
+        message_text = " ".join(x for x in message_parts if x).strip()
+        size = float(row.get("size") or 0)
+        left = float(row.get("sizeleft") or 0)
+        progress = max(0.0, min(100.0, ((size - left) / size * 100.0) if size else 0.0))
+        attention = tracked in ("warning", "error") or status in ("warning", "failed")
+        lower_message = message_text.lower()
+        if "not an upgrade for existing movie file" in lower_message:
+            health = "Optimizer import blocked"
+            health_kind = "optimizer_blocked"
+        elif tracked == "error" or status == "failed":
+            health = "Failed"
+            health_kind = "failed"
+        elif tracked == "warning" or status == "warning":
+            health = "Needs attention"
+            health_kind = "warning"
+        else:
+            health = row.get("status") or row.get("trackedDownloadStatus") or "unknown"
+            health_kind = "normal"
+        result.append({
+            "title": row.get("title") or ("Movie ID %s" % row.get("movieId")),
+            "movie_id": row.get("movieId"),
+            "status": row.get("status") or row.get("trackedDownloadStatus") or "unknown",
+            "tracked": row.get("trackedDownloadStatus") or "",
+            "progress": progress,
+            "timeleft": row.get("timeleft") or "—",
+            "message": message_text,
+            "attention": attention,
+            "health": health,
+            "health_kind": health_kind,
+            "queue_id": row.get("id"),
+        })
+    return result
+
+
+def repair_import(queue_id):
+    """Reprocess one completed Radarr queue item using COPY mode.
+
+    This is intentionally user-triggered. It only handles the specific
+    quality-hierarchy rejection the optimizer understands; all other queue
+    failures remain untouched.
+    """
+    rows = queue_records()
+    row = next((x for x in rows if str(x.get("id")) == str(queue_id)), None)
+    if not row:
+        raise RuntimeError("Queue item is no longer present")
+
+    classified = queue_health([row])[0]
+    if classified.get("health_kind") != "optimizer_blocked":
+        raise RuntimeError("This item is not an optimizer import block")
+    if str(row.get("status") or "").lower() != "completed":
+        raise RuntimeError("Download is not completed")
+    if str(row.get("trackedDownloadState") or "").lower() != "importpending":
+        raise RuntimeError("Download is not waiting for import")
+    if int(row.get("sizeleft") or 0) != 0:
+        raise RuntimeError("Download still has data remaining")
+
+    movie_id = int(row.get("movieId"))
+    movie = radarr_get("/movie/%d" % movie_id)
+    old_file = movie.get("movieFile") or {}
+    old_size = int(old_file.get("size") or 0)
+    new_size = int(row.get("size") or 0)
+    old_res = (((old_file.get("quality") or {}).get("quality") or {}).get("resolution") or 0)
+    new_res = (((row.get("quality") or {}).get("quality") or {}).get("resolution") or 0)
+    if not old_size or not new_size or not old_res or not new_res:
+        raise RuntimeError("Cannot safely compare current and downloaded file")
+    if int(new_res) < int(old_res):
+        raise RuntimeError("Refusing resolution downgrade")
+    if int(new_res) == int(old_res) and new_size >= old_size:
+        raise RuntimeError("Refusing same-resolution replacement that is not smaller")
+
+    download_id = str(row.get("downloadId") or "")
+    if not download_id:
+        raise RuntimeError("Queue item has no downloadId")
+
+    items = radarr_get("/manualimport?downloadId=%s&movieId=%d&filterExistingFiles=true" %
+                       (urllib.parse.quote(download_id), movie_id))
+    usable = []
+    for item in items if isinstance(items, list) else []:
+        rejections = item.get("rejections") or []
+        reasons = " ".join(str((r.get("reason") or r.get("message") or "")) if isinstance(r, dict) else str(r)
+                           for r in rejections).lower()
+        # Only override Radarr's source-quality hierarchy. Anything else stays blocked.
+        bad = [r for r in rejections if "not an upgrade for existing movie file" not in
+               str((r.get("reason") or r.get("message") or "")) .lower()]
+        if not bad:
+            usable.append(item)
+    if len(usable) != 1:
+        raise RuntimeError("Expected exactly one safely reprocessable video file, found %d" % len(usable))
+
+    item = usable[0]
+    payload = {
+        "name": "ManualImport",
+        "files": [{
+            "path": item.get("path"),
+            "folderName": item.get("folderName"),
+            "quality": item.get("quality"),
+            "languages": item.get("languages") or row.get("languages") or [],
+            "releaseGroup": item.get("releaseGroup"),
+            "indexerFlags": item.get("indexerFlags") or 0,
+            "downloadId": download_id,
+            "movieId": movie_id,
+        }],
+        "importMode": 2
+    }
+    if not payload["files"][0]["path"]:
+        raise RuntimeError("Radarr did not return an importable file path")
+    return radarr_request("/command", method="POST", payload=payload)
+
+
+def completed_upgrades(records):
+    """Pair Upgrade deletion -> subsequent import for the same movie.
+
+    This reports observed Radarr history, not predicted optimizer savings.
+    """
+    pending = {}
+    upgrades = []
+    # API records are newest first; process oldest first.
+    for event in reversed(records):
+        movie_id = event.get("movieId")
+        etype = event.get("eventType")
+        data = event.get("data") or {}
+        if etype == "movieFileDeleted" and data.get("reason") == "Upgrade":
+            try:
+                pending[movie_id] = {
+                    "old": int(data.get("size") or 0),
+                    "deleted": event.get("date"),
+                    "old_path": event.get("sourceTitle") or "",
+                }
+            except (TypeError, ValueError):
+                pass
+        elif etype == "downloadFolderImported" and movie_id in pending:
+            try:
+                new_size = int(data.get("size") or 0)
+            except (TypeError, ValueError):
+                new_size = 0
+            old = pending.pop(movie_id)
+            if old["old"] > 0 and new_size > 0:
+                upgrades.append({
+                    "movie_id": movie_id,
+                    "date": event.get("date") or "",
+                    "title": event.get("sourceTitle") or ("Movie ID %s" % movie_id),
+                    "old": old["old"],
+                    "new": new_size,
+                    "saved": old["old"] - new_size,
+                })
+    return sorted(upgrades, key=lambda x: x["date"], reverse=True)
+
+
+def gib(n):
+    return n / (1024.0 ** 3)
+
+
+def run_optimizer(live, app="radarr", searches_per_run=None):
+    with job_lock:
+        if job["running"]:
+            return False
+        job.update(running=True, mode=("%s %s" % (app, "live" if live else "dry-run")), started=time.time(),
+                   finished=None, returncode=None, output="")
+    def worker():
+        script = OPTIMIZER if app == "radarr" else SONARR_OPTIMIZER
+        cmd = ["python3", script] + (["--live"] if live else [])
+        env = os.environ.copy()
+        env["SMART_OPTIMIZER_CONTROL"] = CONTROL_FILE
+        if searches_per_run:
+            env["RADARR_SEARCHES_PER_RUN" if app == "radarr" else "SONARR_SEARCHES_PER_RUN"] = str(searches_per_run)
+        try:
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  text=True, env=env, timeout=60 * 60)
+            output = proc.stdout[-MAX_OUTPUT:]
+            rc = proc.returncode
+        except Exception as exc:
+            output, rc = "ERROR: %s" % exc, -1
+        with job_lock:
+            job.update(running=False, finished=time.time(), returncode=rc, output=output)
+    threading.Thread(target=worker, daemon=True).start()
+    return True
+
+
+CSS = """
+*{box-sizing:border-box}
+:root{color-scheme:dark;--bg:#0b0e13;--panel:#121720;--panel2:#161c26;--line:#242b36;--text:#f3f4f6;--muted:#8993a4;--accent:#7dd3fc;--accent2:#a78bfa;--good:#86efac;--bad:#fda4af;--warn:#fde68a}
+html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text)}
+body{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(circle at 18% -10%,rgba(59,130,246,.10),transparent 32rem),radial-gradient(circle at 90% 0%,rgba(168,85,247,.08),transparent 28rem),var(--bg)}
+a{color:inherit}
+.shell{max-width:1220px;margin:0 auto;padding:30px 28px 54px}
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:28px}
+.brand{display:flex;align-items:center;gap:13px}.mark{width:42px;height:42px;border-radius:12px;display:grid;place-items:center;font-size:20px;font-weight:800;background:linear-gradient(145deg,#2563eb,#7c3aed);box-shadow:inset 0 1px rgba(255,255,255,.22),0 8px 24px rgba(37,99,235,.18)}
+.brandcopy h1{margin:0;font-size:1.15rem;letter-spacing:-.025em}.brandcopy div{font-size:.76rem;color:var(--muted);margin-top:2px}
+.nav{display:flex;align-items:center;gap:8px}.appswitch{display:flex;gap:6px;padding:4px;border:1px solid var(--line);background:#0e131a;border-radius:11px}.appswitch a{text-decoration:none;padding:7px 12px;border-radius:8px;color:#8f9bad;font-size:.75rem;font-weight:700}.appswitch a:hover{color:#fff;background:#17202c}.appswitch a.active{color:#fff;background:#1d2939}.homewrap{min-height:70vh;display:grid;place-items:center}.homecard{text-align:center;max-width:720px}.homecard h1{font-size:2.25rem;margin:0 0 8px;letter-spacing:-.05em}.homecard p{color:var(--muted);margin:0 0 28px}.chooser{display:grid;grid-template-columns:1fr 1fr;gap:14px}.choice{text-decoration:none;text-align:left;padding:24px;border-radius:16px;border:1px solid var(--line);background:linear-gradient(180deg,var(--panel2),var(--panel));transition:.15s}.choice:hover{transform:translateY(-2px);border-color:#3b4758}.choice b{display:block;font-size:1.15rem;margin-bottom:6px}.choice span{font-size:.78rem;color:var(--muted)}.navchip,.status{height:34px;display:inline-flex;align-items:center;gap:8px;padding:0 11px;border-radius:9px;border:1px solid var(--line);background:#10151d;color:#b8c0cc;font-size:.76rem}
+.dot{width:7px;height:7px;border-radius:999px;background:var(--good);box-shadow:0 0 10px rgba(134,239,172,.55)}
+.hero{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;margin-bottom:18px}
+.hero h2{font-size:1.75rem;line-height:1.1;letter-spacing:-.04em;margin:0 0 7px}.hero p{margin:0;color:var(--muted);font-size:.86rem}
+.actions{display:flex;gap:8px;flex-wrap:wrap}.actions form{margin:0}
+button{height:36px;padding:0 13px;border-radius:9px;border:1px solid #334155;background:#172033;color:#e5e7eb;font-weight:700;font-size:.78rem;cursor:pointer}
+button:hover:not(:disabled){background:#1d2940}button.live{background:#2a1720;border-color:#5f2437;color:#fecdd3}button.live:hover:not(:disabled){background:#351b27}button:disabled{opacity:.38;cursor:not-allowed}
+.notice{margin:0 0 16px;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:#10151d;color:var(--muted);font-size:.78rem}.notice.bad{color:var(--bad)}
+.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:16px}
+.stat{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:13px;padding:16px;min-height:120px}
+.stathead{display:flex;align-items:center;justify-content:space-between;gap:12px;color:#aab3c1;font-size:.75rem}.stathead span:first-child{display:flex;align-items:center;gap:8px}.mini{width:24px;height:24px;border-radius:7px;display:grid;place-items:center;background:#0f141c;border:1px solid #222a35;color:#cbd5e1;font-size:.74rem}
+.value{font-size:1.85rem;font-weight:760;letter-spacing:-.045em;margin-top:18px}.good{color:var(--good)}.bad{color:var(--bad)}.muted{color:var(--muted)}.sub{font-size:.73rem;color:var(--muted);margin-top:6px}
+.layout{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(280px,.8fr);gap:16px}
+.panel{background:linear-gradient(180deg,#141a23,#10151c);border:1px solid var(--line);border-radius:13px;overflow:hidden}
+.panel+.panel{margin-top:16px}.layout .panel+.panel{margin-top:0}
+.panelhead{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;padding:16px 17px 13px;border-bottom:1px solid var(--line)}.panelhead h3{font-size:.9rem;margin:0;letter-spacing:-.015em}.panelhead p{font-size:.73rem;color:var(--muted);margin:4px 0 0}.badge{font-size:.64rem;padding:5px 7px;border-radius:999px;border:1px solid #2a3340;color:#93a4b8;background:#0e131a;white-space:nowrap}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px 17px;border-bottom:1px solid #1f2630;font-size:.79rem}th{font-size:.62rem;color:#667085;text-transform:uppercase;letter-spacing:.09em;background:#0f141b}tr:last-child td{border-bottom:0}td:first-child{max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sidecontent{padding:16px}.metricline{display:flex;align-items:center;justify-content:space-between;padding:11px 0;border-bottom:1px solid #202731;font-size:.78rem}.metricline:last-child{border-bottom:0}.metricline span:first-child{color:var(--muted)}.metricline b{font-size:.8rem}
+pre{margin:0;white-space:pre-wrap;word-break:break-word;max-height:305px;overflow:auto;background:#0c1117;padding:15px 17px;color:#bbc5d3;font:11.5px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace}
+.footer{padding-top:22px;text-align:center;font-size:.68rem;color:#4c5667}
+.toolbar{display:flex;gap:10px;align-items:center;margin-bottom:16px}.searchbox{position:relative;flex:1}.searchbox input{width:100%;height:40px;border-radius:10px;border:1px solid var(--line);background:#0f141b;color:var(--text);padding:0 14px 0 38px;outline:none;font-size:.8rem}.searchbox input:focus{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.10)}.searchicon{position:absolute;left:13px;top:10px;color:#64748b}.queueitem{padding:14px 17px;border-bottom:1px solid #1f2630}.queueitem.extra{display:none}.queueitem:last-child{border-bottom:0}.qtop{display:flex;justify-content:space-between;gap:12px;align-items:center}.qtitle{font-size:.8rem;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.qmeta{font-size:.7rem;color:var(--muted);margin-top:5px}.progress{height:5px;background:#0b1016;border-radius:99px;overflow:hidden;margin-top:10px}.progress span{display:block;height:100%;background:linear-gradient(90deg,#3b82f6,#8b5cf6);border-radius:99px}.attention{color:var(--warn)}.empty{padding:22px 17px;color:var(--muted);font-size:.78rem}.expandbar{width:100%;height:38px;border:0;border-top:1px solid var(--line);border-radius:0;background:#10161e;color:#9aa6b7;font-size:.74rem;box-shadow:none}.expandbar:hover:not(:disabled){transform:none;background:#151c26;color:#e5e7eb}.controlbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 16px}.controlbox{display:flex;gap:7px;align-items:center;padding:7px 9px;border:1px solid var(--line);border-radius:10px;background:#10151d}.controlbox label{font-size:.7rem;color:var(--muted)}.controlbox input{width:62px;height:32px;border:1px solid #303947;border-radius:7px;background:#0b1016;color:var(--text);padding:0 8px}.controlbox button{height:32px}.sectiontabs{display:flex;gap:5px;margin-bottom:12px}.tab{font-size:.72rem;padding:6px 9px;border-radius:8px;background:#10151d;border:1px solid var(--line);color:#8e99aa}.tab.active{color:#e5e7eb;background:#17202c}.kpi{font-size:.66rem;color:#667085;text-transform:uppercase;letter-spacing:.08em}
+@media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}.layout{grid-template-columns:1fr}.hero{align-items:flex-start;flex-direction:column}.topbar{align-items:flex-start;flex-direction:column}.nav{width:100%;justify-content:space-between}}
+@media(max-width:520px){.shell{padding:22px 14px 40px}.grid{grid-template-columns:1fr}.hero h2{font-size:1.45rem}th,td{padding:11px 12px}}
+"""
+
+def page():
+    state = load_state()
+    today = time.strftime("%Y-%m-%d")
+    used = int((state.get("daily") or {}).get(today, {}).get("searches", 0))
+    rule_min, rule_max, extra_today = app_controls("radarr")
+    error = ""
+    try:
+        records = history_records()
+        upgrades = completed_upgrades(records)
+        queue = queue_health(queue_records())
+    except Exception as exc:
+        upgrades, queue = [], []
+        error = str(exc)
+    saved = sum(x["saved"] for x in upgrades)
+    positive = sum(1 for x in upgrades if x["saved"] > 0)
+    total_before = sum(x["old"] for x in upgrades)
+    reduction_pct = (saved / total_before * 100.0) if total_before else 0.0
+    attention = [x for x in queue if x["attention"] and x.get("health_kind") != "optimizer_blocked"]
+    optimizer_blocked = [x for x in queue if x.get("health_kind") == "optimizer_blocked"]
+    last_date = upgrades[0]["date"][:10] if upgrades else "—"
+    with job_lock:
+        snap = dict(job)
+
+    rows = ""
+    for x in upgrades[:20]:
+        delta = gib(x["saved"])
+        cls = "good" if delta >= 0 else "bad"
+        rows += "<tr class='filterrow' data-search='%s'><td>%s</td><td>%.2f GiB</td><td>%.2f GiB</td><td class='%s'>%+.2f GiB</td></tr>" % (
+            html.escape(x["title"].lower(), quote=True), html.escape(x["title"]), gib(x["old"]), gib(x["new"]), cls, delta)
+    if not rows:
+        rows = "<tr><td colspan='4' class='muted'>No completed upgrade pairs found in the loaded history window.</td></tr>"
+
+    qrows = ""
+    visible_queue = queue[:4]
+    for i, x in enumerate(queue[:20]):
+        cls = "attention" if x["attention"] else ""
+        note = x["message"] or ("Time left: %s" % x["timeleft"])
+        extra = " extra" if i >= 4 else ""
+        qrows += """<div class="queueitem filterrow%s" data-search="%s"><div class="qtop"><div class="qtitle">%s</div><div class="%s">%s</div></div><div class="qmeta">%.1f%% · %s</div><div class="progress"><span style="width:%.1f%%"></span></div></div>""" % (
+            extra, html.escape(x["title"].lower(), quote=True), html.escape(x["title"]), cls,
+            html.escape(str(x.get("health") or x["status"])),
+            x["progress"], html.escape(note) + ("""<form method="post" action="/repair-import" style="margin-top:9px"><input type="hidden" name="queue_id" value="%s"><button class="live" type="submit">Try safe import</button></form>""" % html.escape(str(x.get("queue_id") or ""), quote=True) if x.get("health_kind") == "optimizer_blocked" else ""), x["progress"])
+    if not qrows:
+        qrows = "<div class='empty'>Nothing is currently in Radarr's download queue.</div>"
+    elif len(queue) > 4:
+        qrows += """<button type="button" class="expandbar" id="queueExpand" onclick="toggleQueue()">Show %d more downloads ↓</button>""" % (min(len(queue), 20) - 4)
+
+    actions = """<div class="actions">
+      <form method="post" action="/action"><input type="hidden" name="app" value="radarr"><input type="hidden" name="action" value="run"><button %s>Run now</button></form>
+      <form method="post" action="/action" onsubmit="return confirm('Allow 50 additional Radarr searches today and run now?')"><input type="hidden" name="app" value="radarr"><input type="hidden" name="action" value="extra50"><button %s>+50 today</button></form>
+      </div><form class="controlbar" method="post" action="/settings"><input type="hidden" name="app" value="radarr"><div class="controlbox"><label>Downsize</label><input name="min" type="number" min="0" max="100" step="0.1" value="%.1f"><span>–</span><input name="max" type="number" min="0" max="100" step="0.1" value="%.1f"><span>%%</span><button type="submit">Apply</button></div><span class="badge">%d/%d searches · +%d today</span></form><div class="actions" style="display:none">
+      <form method="post" action="/run"><input type="hidden" name="mode" value="dry"><button %s>Dry run</button></form>
+      <form method="post" action="/run"><input type="hidden" name="mode" value="live"><button class="live" %s>Optimize now</button></form>
+      </div>""" % ("" if ENABLE_ACTIONS and not snap["running"] else "disabled",
+                    "" if ENABLE_ACTIONS and not snap["running"] else "disabled",
+                    rule_min, rule_max, used, RADARR_BASE_BUDGET + extra_today, extra_today,
+                    "" if ENABLE_ACTIONS and not snap["running"] else "disabled",
+                    "" if ENABLE_ACTIONS and not snap["running"] else "disabled")
+    output = html.escape(snap.get("output") or "No UI-started run yet.")
+    status = "Running %s…" % snap["mode"] if snap["running"] else "Idle"
+    warning = "" if ENABLE_ACTIONS else "<div class='notice'>Read-only mode is active. Smart retry controls will only be enabled after we validate queue detection and candidate selection.</div>"
+    err = ("<div class='notice bad'>Radarr API error: %s</div>" % html.escape(error)) if error else ""
+
+    return """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0b0e13"><title>Radarr Smart Optimizer</title><style>%s</style></head>
+<body><div class="shell">
+<div class="topbar"><div class="brand"><div class="mark">R</div><div class="brandcopy"><h1>Radarr Smart Optimizer</h1><div>Library optimization dashboard</div></div></div><div class="nav"><div class="appswitch"><a class="active" href="/radarr">Radarr</a><a href="/sonarr">Sonarr</a></div><span class="status"><span class="dot"></span>%s</span></div></div>
+<div class="hero"><div><h2>Overview</h2><p>See savings, active downloads, problem jobs and optimizer activity in one place.</p></div>%s</div>
+%s%s
+<div class="toolbar"><div class="searchbox"><span class="searchicon">⌕</span><input id="librarySearch" autocomplete="off" placeholder="Search releases and current downloads…"></div></div>
+<div class="grid">
+<div class="stat"><div class="stathead"><span><span class="mini">↘</span>Storage saved</span></div><div class="value %s">%+.2f GiB</div><div class="sub">Observed across loaded upgrade history</div></div>
+<div class="stat"><div class="stathead"><span><span class="mini">✓</span>Space reductions</span></div><div class="value">%d</div><div class="sub">Observed upgrades that ended smaller</div></div>
+<div class="stat"><div class="stathead"><span><span class="mini">↓</span>Active downloads</span></div><div class="value">%d</div><div class="sub">%d need attention · %d optimizer import blocked</div></div>
+<div class="stat"><div class="stathead"><span><span class="mini">⌕</span>Searches today</span></div><div class="value">%d</div><div class="sub">Optimizer state counter</div></div>
+</div>
+<div class="layout"><div>
+<div class="panel"><div class="panelhead"><div><h3>Recent file changes</h3><p>Observed Radarr upgrade pairs. These are not all necessarily optimizer-triggered.</p></div><span class="badge">HISTORY</span></div>
+<table><thead><tr><th>Release</th><th>Before</th><th>After</th><th>Change</th></tr></thead><tbody>%s</tbody></table></div>
+<div class="panel"><div class="panelhead"><div><h3>Optimizer activity</h3><p>Output from runs started through this dashboard.</p></div><span class="badge">ACTIVITY</span></div><pre>%s</pre></div>
+</div>
+<div>
+<div class="panel"><div class="panelhead"><div><h3>Download radar</h3><p>Live Radarr queue with problem jobs surfaced automatically.</p></div><span class="badge">%d ACTIVE</span></div>%s</div>
+<div class="panel"><div class="panelhead"><div><h3>Optimizer intelligence</h3><p>Useful context without pretending Radarr history equals optimizer success.</p></div><span class="badge">SUMMARY</span></div><div class="sidecontent">
+<div class="metricline"><span>Observed net reduction</span><b class="%s">%.1f%%</b></div>
+<div class="metricline"><span>Smaller replacements</span><b>%d</b></div>
+<div class="metricline"><span>Downloads needing attention</span><b class="%s">%d</b></div>
+<div class="metricline"><span>Optimizer imports blocked</span><b class="%s">%d</b></div>
+<div class="metricline"><span>Last observed upgrade</span><b>%s</b></div>
+<div class="metricline"><span>Engine</span><b>%s</b></div>
+<div class="metricline"><span>UI mode</span><b>%s</b></div>
+</div></div></div></div>
+<div class="footer">Radarr Smart Optimizer · storage intelligence, not another Radarr replacement</div>
+</div>
+<script>
+let queueOpen=false;
+function toggleQueue(){queueOpen=!queueOpen;document.querySelectorAll('.queueitem.extra').forEach(el=>el.style.display=queueOpen?'block':'none');const b=document.getElementById('queueExpand');if(b)b.textContent=queueOpen?'Collapse downloads ↑':'Show more downloads ↓';}
+const box=document.getElementById('librarySearch');
+box.addEventListener('input',()=>{const q=box.value.trim().toLowerCase();document.querySelectorAll('.filterrow').forEach(el=>{const match=!q||((el.dataset.search||'').includes(q));if(el.classList.contains('extra')&&!queueOpen&&!q){el.style.display='none';}else{el.style.display=match?'':'none';}});});
+</script></body></html>""" % (
+        CSS, html.escape(status), actions, warning, err,
+        "good" if saved >= 0 else "bad", gib(saved), positive,
+        len(queue), len(attention), len(optimizer_blocked), used, rows, output, len(queue), qrows,
+        "good" if reduction_pct >= 0 else "bad", reduction_pct, positive,
+        "bad" if attention else "good", len(attention),
+        "bad" if optimizer_blocked else "good", len(optimizer_blocked), html.escape(last_date),
+        html.escape(status), "Actions enabled" if ENABLE_ACTIONS else "Read-only")
+
+
+
+def home_page():
+    return """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Smart Optimizer</title><style>%s</style></head><body><div class="shell homewrap"><div class="homecard"><div class="brand" style="justify-content:center;margin-bottom:24px"><div class="mark">S</div></div><h1>Smart Optimizer</h1><p>Choose the library you want to inspect.</p><div class="chooser"><a class="choice" href="/radarr"><b>Radarr →</b><span>Movies · storage savings · download radar</span></a><a class="choice" href="/sonarr"><b>Sonarr →</b><span>Episodes · storage savings · download radar</span></a></div></div></div></body></html>""" % CSS
+
+
+def sonarr_page():
+    state = load_sonarr_state()
+    today = time.strftime("%Y-%m-%d")
+    used = int((state.get("daily") or {}).get(today, {}).get("searches", 0))
+    rule_min, rule_max, extra_today = app_controls("sonarr")
+    error = ""
+    try:
+        records = sonarr_history_records()
+        upgrades = sonarr_completed_upgrades(records)
+        queue = sonarr_queue_records()
+    except Exception as exc:
+        upgrades, queue = [], []
+        error = str(exc)
+    saved = sum(x["saved"] for x in upgrades)
+    positive = sum(1 for x in upgrades if x["saved"] > 0)
+    rows = ""
+    for x in upgrades[:20]:
+        delta = gib(x["saved"])
+        cls = "good" if delta >= 0 else "bad"
+        rows += "<tr><td>%s</td><td>%.2f GiB</td><td>%.2f GiB</td><td class='%s'>%+.2f GiB</td></tr>" % (
+            html.escape(x["title"]), gib(x["old"]), gib(x["new"]), cls, delta)
+    if not rows:
+        rows = "<tr><td colspan='4' class='muted'>No completed episode upgrade pairs found in the loaded history window.</td></tr>"
+    qrows = ""
+    for x in queue[:20]:
+        size = float(x.get("size") or 0); left = float(x.get("sizeleft") or 0)
+        progress = max(0.0, min(100.0, ((size-left)/size*100.0) if size else 0.0))
+        title = x.get("title") or ("Episode ID %s" % x.get("episodeId"))
+        status = x.get("status") or x.get("trackedDownloadStatus") or "unknown"
+        qrows += "<div class='queueitem'><div class='qtop'><div class='qtitle'>%s</div><div>%s</div></div><div class='qmeta'>%.1f%%</div><div class='progress'><span style='width:%.1f%%'></span></div></div>" % (
+            html.escape(str(title)), html.escape(str(status)), progress, progress)
+    if not qrows:
+        qrows = "<div class='empty'>Nothing is currently in Sonarr's download queue.</div>"
+    err = ("<div class='notice bad'>Sonarr API error: %s</div>" % html.escape(error)) if error else ""
+    return """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sonarr Smart Optimizer</title><style>%s</style></head><body><div class="shell">
+<div class="topbar"><div class="brand"><div class="mark">S</div><div class="brandcopy"><h1>Sonarr Smart Optimizer</h1><div>Episode optimization dashboard</div></div></div><div class="nav"><div class="appswitch"><a href="/radarr">Radarr</a><a class="active" href="/sonarr">Sonarr</a></div><span class="status"><span class="dot"></span>Idle</span></div></div>
+<div class="hero"><div><h2>Overview</h2><p>See episode savings, active downloads and optimizer activity in one place.</p></div><div class="actions"><form method="post" action="/action"><input type="hidden" name="app" value="sonarr"><input type="hidden" name="action" value="run"><button>Run now</button></form><form method="post" action="/action" onsubmit="return confirm('Allow 50 additional Sonarr searches today and run now?')"><input type="hidden" name="app" value="sonarr"><input type="hidden" name="action" value="extra50"><button>+50 today</button></form></div></div><form class="controlbar" method="post" action="/settings"><input type="hidden" name="app" value="sonarr"><div class="controlbox"><label>Downsize</label><input name="min" type="number" min="0" max="100" step="0.1" value="%.1f"><span>–</span><input name="max" type="number" min="0" max="100" step="0.1" value="%.1f"><span>%%</span><button type="submit">Apply</button></div><span class="badge">%d/%d searches · +%d today</span><span class="badge">UHD 1080→2160 exception unchanged</span></form>%s
+<div class="grid"><div class="stat"><div class="stathead"><span><span class="mini">↘</span>Storage saved</span></div><div class="value %s">%+.2f GiB</div><div class="sub">Observed across loaded Sonarr upgrade history</div></div>
+<div class="stat"><div class="stathead"><span><span class="mini">✓</span>Space reductions</span></div><div class="value">%d</div><div class="sub">Episode replacements that ended smaller</div></div>
+<div class="stat"><div class="stathead"><span><span class="mini">↓</span>Active downloads</span></div><div class="value">%d</div><div class="sub">Current Sonarr queue</div></div>
+<div class="stat"><div class="stathead"><span><span class="mini">⌕</span>Searches today</span></div><div class="value">%d</div><div class="sub">Optimizer state counter</div></div></div>
+<div class="layout"><div><div class="panel"><div class="panelhead"><div><h3>Recent episode changes</h3><p>Observed Sonarr upgrade pairs; not all are necessarily optimizer-triggered.</p></div><span class="badge">HISTORY</span></div><table><thead><tr><th>Release</th><th>Before</th><th>After</th><th>Change</th></tr></thead><tbody>%s</tbody></table></div></div>
+<div><div class="panel"><div class="panelhead"><div><h3>Download radar</h3><p>Live Sonarr queue.</p></div><span class="badge">%d ACTIVE</span></div>%s</div></div></div>
+<div class="footer"><a href="/">Smart Optimizer</a> · Sonarr dashboard</div></div></body></html>""" % (
+        CSS, rule_min, rule_max, used, SONARR_BASE_BUDGET + extra_today, extra_today, err, "good" if saved >= 0 else "bad", gib(saved), positive, len(queue), used, rows, len(queue), qrows)
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/":
+            rendered = home_page()
+        elif path == "/radarr":
+            rendered = page()
+        elif path == "/sonarr":
+            rendered = sonarr_page()
+        else:
+            self.send_error(404); return
+        body = rendered.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        length = min(int(self.headers.get("Content-Length", "0")), 4096)
+        form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"))
+        if self.path == "/settings":
+            if not ENABLE_ACTIONS:
+                self.send_error(403); return
+            app = (form.get("app") or [""])[0]
+            if app not in ("radarr", "sonarr"):
+                self.send_error(400); return
+            try:
+                update_saving_window(app, float((form.get("min") or [""])[0]), float((form.get("max") or [""])[0]))
+            except Exception as exc:
+                self.send_error(400, str(exc)); return
+            self.send_response(303); self.send_header("Location", "/" + app); self.end_headers(); return
+        if self.path == "/action":
+            if not ENABLE_ACTIONS:
+                self.send_error(403); return
+            app = (form.get("app") or [""])[0]; action = (form.get("action") or [""])[0]
+            if app not in ("radarr", "sonarr") or action not in ("run", "extra50"):
+                self.send_error(400); return
+            if action == "extra50":
+                add_daily_extra(app, 50)
+                run_optimizer(True, app, 50)
+            else:
+                run_optimizer(True, app)
+            self.send_response(303); self.send_header("Location", "/" + app); self.end_headers(); return
+        if self.path == "/repair-import":
+            try:
+                repair_import((form.get("queue_id") or [""])[0])
+            except Exception as exc:
+                print("[ui] safe import failed:", exc)
+                self.send_error(409, str(exc)); return
+            self.send_response(303); self.send_header("Location", "/radarr"); self.end_headers(); return
+        if self.path != "/run" or not ENABLE_ACTIONS:
+            self.send_error(403); return
+        mode = (form.get("mode") or [""])[0]
+        if mode not in ("dry", "live"):
+            self.send_error(400); return
+        run_optimizer(mode == "live")
+        self.send_response(303)
+        self.send_header("Location", "/radarr")
+        self.end_headers()
+
+    def log_message(self, fmt, *args):
+        print("[ui] " + fmt % args)
+
+
+if __name__ == "__main__":
+    print("Radarr Smart Optimizer UI")
+    print("Listening on http://%s:%d" % (HOST, PORT))
+    print("Actions:", "ENABLED" if ENABLE_ACTIONS else "disabled (read-only)")
+    if HOST not in ("127.0.0.1", "localhost", "::1"):
+        print("WARNING: UI has no built-in authentication; expose only on a trusted LAN/reverse proxy.")
+    ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()

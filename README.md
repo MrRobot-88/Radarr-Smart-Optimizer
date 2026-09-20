@@ -51,7 +51,7 @@ This is designed to be **download, configure, run**.
 
 1. Download `radarr-smart-optimizer.py`.
 2. Provide your API key through the `RADARR_KEY` environment variable or a protected key file. Do not paste it into the Python source.
-3. Set `RADARR_SEARCHES_PER_RUN` if you want to change the default maximum of `50` interactive searches per run.
+3. Set `RADARR_SEARCHES_PER_RUN` if you want to change the default maximum of `10` interactive searches per run.
 4. **Review `NORMAL_PROFILE_ID` and `UHD_PROFILE_ID`** in the script and make sure they match your Radarr quality-profile IDs.
 5. Run:
 
@@ -77,7 +77,7 @@ In Radarr, open **Settings → General → Security → API Key**. The optimizer
 
 ```sh
 export RADARR_KEY="$(cat /path/to/.radarr-smart-optimizer-key)"
-export RADARR_SEARCHES_PER_RUN=50
+export RADARR_SEARCHES_PER_RUN=10
 python3 radarr-smart-optimizer.py
 ```
 
@@ -104,6 +104,46 @@ Radarr normally uses port **7878**. Set `RADARR_URL` if yours uses another port.
 The optimizer includes a conservative 2160p Dolby Vision + HDR size policy. Dolby Vision-only candidates are rejected; releases classified as Dolby Vision + HDR fallback are handled separately by the optimizer's safety rules.
 
 Review a dry run against your own release naming/indexers before live mode because HDR/DV detection depends partly on release metadata.
+
+## Optional lightweight web UI
+
+The optimizer remains fully headless and does **not** require a web service. If you want a dashboard, `radarr-smart-optimizer-ui.py` is an optional standard-library-only UI that reads the existing optimizer state plus Radarr history.
+
+It shows observed storage change from completed Radarr upgrades, completed upgrade pairs, today's optimizer search count, recent upgrade history, and output from runs started through the UI.
+
+Start it locally:
+
+```sh
+export RADARR_KEY="$(cat /path/to/.radarr-smart-optimizer-key)"
+python3 radarr-smart-optimizer-ui.py
+```
+
+The safe default is **read-only** and binds to `127.0.0.1:8788`. To make it reachable on a trusted LAN:
+
+```sh
+export RADARR_UI_HOST=0.0.0.0
+python3 radarr-smart-optimizer-ui.py
+```
+
+To also enable the **Dry Run** and **Optimize Now (LIVE)** buttons:
+
+```sh
+export RADARR_UI_ENABLE_ACTIONS=1
+```
+
+The UI intentionally has no built-in authentication. Do not expose it directly to the internet. If action buttons are enabled, keep it on a trusted LAN or place it behind an authenticated reverse proxy.
+
+The storage figure is deliberately labelled **observed space change**: it pairs Radarr `movieFileDeleted` events whose reason is `Upgrade` with subsequent imports for the same movie. This is useful for measuring real file changes, but Radarr history alone cannot prove that every displayed upgrade was initiated by this optimizer.
+
+Optional UI variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `RADARR_UI_HOST` | `127.0.0.1` | Dashboard bind address |
+| `RADARR_UI_PORT` | `8788` | Dashboard port |
+| `RADARR_UI_ENABLE_ACTIONS` | `0` | Enable dry-run/live buttons |
+| `RADARR_UI_HISTORY_PAGES` | `5` | Number of 100-record Radarr history pages used for statistics |
+| `RADARR_OPTIMIZER_SCRIPT` | script beside UI | Optimizer executable path |
 
 ## Scheduling
 
