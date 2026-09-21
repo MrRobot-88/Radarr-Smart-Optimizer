@@ -49,7 +49,32 @@ UHD_PROFILE_ID = 5
 
 DAILY_SEARCH_BUDGET = 300
 MIN_SEEDERS = 1
-MIN_SAVING_PERCENT = 5.0
+MIN_SAVING_PERCENT = float(os.environ.get("RADARR_MIN_SAVING_PERCENT", "5.0"))
+MAX_SAVING_PERCENT = float(os.environ.get("RADARR_MAX_SAVING_PERCENT", "50.0"))
+CONTROL_FILE = os.environ.get("SMART_OPTIMIZER_CONTROL", os.path.join(SCRIPT_DIR, "smart-optimizer-control.json"))
+
+def load_runtime_controls():
+    controls = {}
+    try:
+        with open(CONTROL_FILE, "r", encoding="utf-8") as f:
+            controls = (json.load(f) or {}).get("radarr", {})
+    except Exception:
+        pass
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        minimum = float(controls.get("min_saving_percent", MIN_SAVING_PERCENT))
+        maximum = float(controls.get("max_saving_percent", MAX_SAVING_PERCENT))
+        if not (0 <= minimum <= maximum <= 100):
+            raise ValueError
+    except (TypeError, ValueError):
+        minimum, maximum = MIN_SAVING_PERCENT, MAX_SAVING_PERCENT
+    try:
+        extra = int((controls.get("daily_extra") or {}).get(today, 0))
+    except (TypeError, ValueError):
+        extra = 0
+    return minimum, maximum, max(0, extra)
+
+MIN_SAVING_PERCENT, MAX_SAVING_PERCENT, DAILY_EXTRA_BUDGET = load_runtime_controls()
 
 
 # Don't deliberately grab the exact same release again for this long
@@ -61,11 +86,18 @@ LARGE_1080P_MIB = 1800
 COMPACT_1080P_X265_MIB = 1200
 LARGE_2160P_MIB = 6000
 
-# Hard ceiling for a 1080p -> 2160p resolution upgrade.
-# 8 GiB = 8192 MiB.
-MAX_4K_UPGRADE_MIB = 8192
-
 LIVE = "--live" in sys.argv
+
+# Manual UI mode:
+# Number entered in the UI means SUCCESSFUL upgrades/grabs,
+# not number of indexer searches.
+try:
+    TARGET_GRABS = max(
+        0,
+        int(os.environ.get("SMART_OPTIMIZER_TARGET_GRABS", "0"))
+    )
+except (TypeError, ValueError):
+    TARGET_GRABS = 0
 
 if not API_KEY:
     print("ERROR: Radarr API key is not configured.")
@@ -157,7 +189,11 @@ def blank_state():
         "version": 1,
         "movies": {},
         "attempted_releases": {},
-        "daily": {}
+        "daily": {},
+        "movie_queue": [],
+        "movie_cursor": 0,
+        "known_movie_ids": [],
+        "queue_initialized": False
     }
 
 
@@ -173,6 +209,10 @@ def load_state():
         state.setdefault("movies", {})
         state.setdefault("attempted_releases", {})
         state.setdefault("daily", {})
+        state.setdefault("movie_queue", [])
+        state.setdefault("movie_cursor", 0)
+        state.setdefault("known_movie_ids", [])
+        state.setdefault("queue_initialized", False)
 
         return state
 
@@ -187,12 +227,13 @@ def save_state(state):
     if not LIVE:
         return
 
-    tmp = STATE_FILE + ".tmp"
-
-    with open(tmp, "w", encoding="utf-8") as f:
+    # STATE_FILE may be a Docker single-file bind mount. Replacing the inode
+    # with os.replace() can fail with EBUSY. Write in place instead, matching
+    # the production-safe Sonarr implementation.
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, sort_keys=True)
-
-    os.replace(tmp, STATE_FILE)
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def today_key():
@@ -345,11 +386,11 @@ def audio_channels_from_text(text):
     text = (text or "").lower()
 
     patterns = [
-        (7.1, r"\b7[\s._-]?1\b"),
-        (5.1, r"\b5[\s._-]?1\b"),
-        (2.1, r"\b2[\s._-]?1\b"),
-        (2.0, r"\b2[\s._-]?0\b"),
-        (1.0, r"\b1[\s._-]?0\b"),
+        (7.1, r"(?<!\d)7[\s._-]?1\b"),
+        (5.1, r"(?<!\d)5[\s._-]?1\b"),
+        (2.1, r"(?<!\d)2[\s._-]?1\b"),
+        (2.0, r"(?<!\d)2[\s._-]?0\b"),
+        (1.0, r"(?<!\d)1[\s._-]?0\b"),
     ]
 
     for channels, pattern in patterns:
@@ -586,6 +627,139 @@ def priority_score(item):
 
     return score
 
+def initialize_movie_queue(state, movies):
+    """Create the persistent A-Z optimizer queue once."""
+    with_files = [m for m in movies if m.get("id") and m.get("hasFile")]
+    ordered = sorted(
+        with_files,
+        key=lambda m: ((m.get("title") or "").casefold(), int(m.get("id", 0)))
+    )
+    state["movie_queue"] = [
+        {
+            "movie_id": int(m["id"]),
+            "title": m.get("title") or "Unknown movie",
+            "year": m.get("year"),
+        }
+        for m in ordered
+    ]
+    state["movie_cursor"] = 0
+    state["known_movie_ids"] = [x["movie_id"] for x in state["movie_queue"]]
+    state["queue_initialized"] = True
+    save_state(state)
+    print("PERMANENT A-Z MOVIE QUEUE READY:", len(state["movie_queue"]), "movies", flush=True)
+
+
+def append_new_movies(state, movies):
+    """Append newly downloaded movies to the END; never reorder the existing queue."""
+    known = set(int(x) for x in state.get("known_movie_ids", []))
+    added = 0
+    for movie in movies:
+        mid = int(movie.get("id", 0) or 0)
+        if not mid or mid in known or not movie.get("hasFile"):
+            continue
+        state.setdefault("movie_queue", []).append({
+            "movie_id": mid,
+            "title": movie.get("title") or "Unknown movie",
+            "year": movie.get("year"),
+        })
+        known.add(mid)
+        added += 1
+        print("APPENDED NEW MOVIE TO BOTTOM:", movie.get("title"), flush=True)
+    state["known_movie_ids"] = sorted(known)
+    if added:
+        save_state(state)
+    return added
+
+
+def movie_item(movie, state, queued_ids):
+    """Return an optimizer-searchable movie item, or None without consuming search quota."""
+    movie_id = movie.get("id")
+    if not movie_id or not movie.get("hasFile") or movie_id in queued_ids:
+        return None
+
+    history = state.get("movies", {}).get(str(movie_id), {})
+    cycles = int(history.get("search_cycles", 0))
+    last_search = history.get("last_search")
+    if cycles >= 2:
+        return None
+    if cycles == 1 and last_search and age_days(last_search) < 180:
+        return None
+
+    movie_file = movie.get("movieFile") or {}
+    size_bytes = movie_file.get("size") or 0
+    if size_bytes <= 0:
+        return None
+
+    resolution = file_resolution(movie_file)
+    if resolution not in (1080, 2160):
+        return None
+
+    profile_id = movie.get("qualityProfileId")
+    target_resolution = 2160 if profile_id == UHD_PROFILE_ID else resolution
+
+    return {
+        "movie_id": movie_id,
+        "tmdb_id": movie.get("tmdbId"),
+        "title": movie.get("title") or "Unknown movie",
+        "year": movie.get("year"),
+        "profile_id": profile_id,
+        "resolution": resolution,
+        "target_resolution": target_resolution,
+        "size_bytes": size_bytes,
+        "size_mib": mib(size_bytes),
+        "codec": current_codec(movie_file),
+        "audio_channels": radarr_current_audio_channels(movie_file),
+        "atmos": radarr_current_atmos(movie_file),
+        "dynamic_range": radarr_current_dynamic_range(movie_file),
+        "movie_file": movie_file,
+    }
+
+
+def next_movie_item(state, movies_by_id, queued_ids):
+    """Advance the one persistent cursor until an eligible movie is found or queue ends."""
+    queue = state.get("movie_queue", [])
+    while int(state.get("movie_cursor", 0)) < len(queue):
+        cursor = int(state.get("movie_cursor", 0))
+        ref = queue[cursor]
+        state["movie_cursor"] = cursor + 1
+        if LIVE:
+            save_state(state)
+
+        movie = movies_by_id.get(int(ref.get("movie_id", 0)))
+        if not movie:
+            continue
+
+        # User-managed Smart Optimizer exclusion.
+        # Skip BEFORE any interactive release search.
+        if int(movie.get("id", 0)) in optimizer_excluded_ids("radarr"):
+            print(
+                "    EXCLUDED: %s -- skipped without searching"
+                % (movie.get("title") or "Unknown movie"),
+                flush=True
+            )
+            continue
+
+        item = movie_item(movie, state, queued_ids)
+        if item is not None:
+            return item
+    return None
+
+
+def optimizer_excluded_ids(app="radarr"):
+    try:
+        with open(CONTROL_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        raw = (data.get(app, {}) or {}).get("exclusions") or []
+        return {
+            int(x.get("id"))
+            for x in raw
+            if isinstance(x, dict) and x.get("id") is not None
+        }
+    except Exception:
+        return set()
+
+
 def collect_candidates(state, queued_ids):
     movies = get("/movie")
     items = []
@@ -660,7 +834,7 @@ def collect_candidates(state, queued_ids):
             "target_resolution": target_resolution,
             "size_bytes": size_bytes,
             "size_mib": mib(size_bytes),
-            "codec": current_codec(media),
+            "codec": current_codec(movie_file),
             "audio_channels": radarr_current_audio_channels(movie_file),
             "atmos": radarr_current_atmos(movie_file),
             "dynamic_range": radarr_current_dynamic_range(movie_file),
@@ -695,7 +869,16 @@ def rejection_allowed(rejection):
 
     reason = reason.lower()
 
-    return "existing file meets cutoff" in reason
+    # The optimizer has its own conservative quality gate below. Radarr may
+    # call a smaller same-resolution BluRay release a downgrade when the current
+    # file is a Remux. That is not automatically a downgrade for this project:
+    # resolution/HDR/DV/audio protections and storage efficiency decide.
+    optimizer_quality_rejections = (
+        "existing file meets cutoff",
+        "not an upgrade for existing movie file",
+        "quality for existing file on disk is of equal or higher preference",
+    )
+    return any(text in reason for text in optimizer_quality_rejections)
 
 
 def radarr_rejections_ok(release):
@@ -761,29 +944,55 @@ def evaluate_release(item, release, state):
     candidate_mib = mib(size_bytes)
     current_mib = item["size_mib"]
 
-    if candidate_resolution > current_resolution and candidate_mib > MAX_4K_UPGRADE_MIB:
-        return None, "4K upgrade exceeds size ceiling"
-
     saving = ((current_mib - candidate_mib) / current_mib) * 100.0
 
-    # 5% saving is required only for same-resolution replacement.
-    # A legitimate UHD-profile 1080p -> 2160p upgrade may be larger.
-    if candidate_resolution == current_resolution:
-        if saving < MIN_SAVING_PERCENT:
-            return None, "less than 5 percent saving"
+    # Storage-first policy applies to EVERY replacement, including 1080p -> 2160p.
+    # A candidate must save meaningful space, but an extreme reduction is rejected
+    # as a compression/quality-risk guardrail.
+    # Tiny tolerance prevents floating-point conversion noise from rejecting
+    # a candidate that is mathematically exactly on the configured boundary.
+    SAVING_EPSILON = 1e-6
+
+    if saving < MIN_SAVING_PERCENT - SAVING_EPSILON:
+        print(
+            "    SIZE RULE: %.3f%% saving | allowed %.1f%%-%.1f%% | REJECT: below minimum"
+            % (saving, MIN_SAVING_PERCENT, MAX_SAVING_PERCENT),
+            flush=True
+        )
+        return None, "candidate does not save enough space"
+
+    if saving > MAX_SAVING_PERCENT + SAVING_EPSILON:
+        print(
+            "    SIZE RULE: %.3f%% saving | allowed %.1f%%-%.1f%% | REJECT: above maximum"
+            % (saving, MIN_SAVING_PERCENT, MAX_SAVING_PERCENT),
+            flush=True
+        )
+        return None, "candidate saves too much space (quality-risk guardrail)"
+
+    print(
+        "    SIZE RULE: %.3f%% saving | allowed %.1f%%-%.1f%% | PASS"
+        % (saving, MIN_SAVING_PERCENT, MAX_SAVING_PERCENT),
+        flush=True
+    )
 
     candidate_codec = codec_from_text(title)
+
+    # HARD COMPATIBILITY RULE:
+    # AV1 replacements are disabled because the configured playback
+    # environment is not guaranteed to support AV1.
+    if candidate_codec == "av1":
+        print("    CODEC RULE: AV1 | REJECT: AV1 not allowed", flush=True)
+        return None, "AV1 not allowed"
+
     candidate_channels = audio_channels_from_text(title)
     candidate_atmos = radarr_candidate_atmos(title)
     candidate_dr = radarr_candidate_dynamic_range(title)
 
-    # 4K Dolby Vision must explicitly include HDR fallback and be 10-25 GiB.
+    # 4K Dolby Vision must explicitly include HDR fallback.
+    # Size safety is handled by the relative MIN/MAX saving window above,
+    # rather than a fixed GiB range that cannot scale with the current file.
     if candidate_resolution == 2160 and candidate_dr == "DV_ONLY":
         return None, "4K DV without HDR fallback"
-    if candidate_resolution == 2160 and candidate_dr == "DV_HDR":
-        gib = size_bytes / float(1024 ** 3)
-        if gib < 10 or gib > 25:
-            return None, "4K DV HDR outside 10-25 GiB"
 
     if not radarr_dynamic_range_allowed(item["dynamic_range"], candidate_dr):
         return None, "dynamic range protection"
@@ -834,10 +1043,28 @@ def choose_best(item, releases, state):
     if not pool:
         return None
 
-    # Same resolution: storage saving is the primary goal.
-    # x265/HEVC is only a secondary preference, never a reason
-    # to choose a larger file over a smaller qualifying x264 file.
+    # All candidates in this pool have already passed the hard safety gates.
+    #
+    # Preference order:
+    #   1. Dynamic range: DV+HDR > HDR > SDR/unknown
+    #   2. Atmos
+    #   3. Audio channel count
+    #   4. Smaller file
+    #   5. x265/HEVC
+    #   6. More seeders
+    #
+    # Hard protections still prevent losing existing HDR/DV, Atmos or
+    # channel count. These preferences only rank already-safe candidates.
+    dr_rank = {
+        "DV_HDR": 3,
+        "HDR": 2,
+        "SDR_UNKNOWN": 1
+    }
+
     pool.sort(key=lambda x: (
+        -dr_rank.get(x.get("dynamic_range", "SDR_UNKNOWN"), 0),
+        -int(bool(x.get("atmos", False))),
+        -(x.get("audio_channels") or 0),
         x["size_bytes"],
         0 if x["codec"] == "x265" else 1,
         -x["seeders"],
@@ -1059,8 +1286,8 @@ def main():
     else:
         print("MODE: DRY RUN -- NO RELEASES WILL BE GRABBED")
 
-    print("Daily interactive-search budget:", DAILY_SEARCH_BUDGET)
-    print("Minimum same-resolution saving: %.1f%%" % MIN_SAVING_PERCENT)
+    print("Daily interactive-search budget:", DAILY_SEARCH_BUDGET + DAILY_EXTRA_BUDGET, "(base %d + today override %d)" % (DAILY_SEARCH_BUDGET, DAILY_EXTRA_BUDGET))
+    print("Allowed saving window: %.1f%% to %.1f%%" % (MIN_SAVING_PERCENT, MAX_SAVING_PERCENT))
     print()
 
     used = searches_used_today(state)
@@ -1071,7 +1298,7 @@ def main():
     if LIVE:
         remaining = min(
             PER_RUN_SEARCH_BUDGET,
-            max(0, DAILY_SEARCH_BUDGET - used)
+            max(0, DAILY_SEARCH_BUDGET + DAILY_EXTRA_BUDGET - used)
         )
     else:
         # Dry run does NOT consume persistent budget.
@@ -1100,43 +1327,21 @@ def main():
     print("Reading Radarr queue...")
 
     queued_ids = active_movie_ids()
+    movies = get("/movie")
+    movies_by_id = {int(m["id"]): m for m in movies if m.get("id")}
 
-    print(
-        "Movies currently represented in queue:",
-        len(queued_ids)
-    )
+    print("Movies currently represented in queue:", len(queued_ids))
+    print("Movies in Radarr:", len(movies))
+    print("Movies with files:", sum(1 for m in movies if m.get("hasFile")))
 
-    print()
+    if not state.get("queue_initialized") or not state.get("movie_queue"):
+        print("Creating persistent A-Z movie queue...", flush=True)
+        initialize_movie_queue(state, movies)
 
-    candidates, stats = collect_candidates(
-        state,
-        queued_ids
-    )
+    append_new_movies(state, movies)
 
-    print("Movies in Radarr:", stats["movies"])
-    print("Movies with files:", stats["with_file"])
-    print("Queued movies skipped:", stats["queued"])
-
-    print()
-    print(
-        "Eligible local optimization candidates:",
-        len(candidates)
-    )
-
-    if not candidates:
-        print("Nothing currently needs an optimizer search.")
-        return
-
-    # Search the highest-value optimization candidates first.
-    candidates.sort(key=priority_score, reverse=True)
-
-    selected = candidates[:remaining]
-
-    print()
-    print(
-        "Highest-priority movies selected for this run:",
-        len(selected)
-    )
+    print("Persistent optimizer queue:", len(state.get("movie_queue", [])))
+    print("Saved queue cursor:", state.get("movie_cursor", 0))
     print()
 
     searches = 0
@@ -1144,10 +1349,18 @@ def main():
     no_match = 0
     errors = 0
 
-    for number, item in enumerate(selected, 1):
+    number = 0
+    while searches < remaining and (TARGET_GRABS <= 0 or grabs < TARGET_GRABS):
+        item = next_movie_item(state, movies_by_id, queued_ids)
+        if item is None:
+            print("Reached the genuine end of the persistent movie queue.", flush=True)
+            break
+
+        number += 1
         print("-" * 68)
 
         describe_item(number, item)
+        print("    NOW CHECKING: %s (%s)" % (item.get("title", "Unknown"), item.get("year", "?")), flush=True)
 
         movie_id = item["movie_id"]
 
@@ -1159,6 +1372,7 @@ def main():
             )
 
             searches += 1
+            print("    SEARCH PROGRESS: %d / %d" % (searches, remaining), flush=True)
 
             if LIVE:
                 increment_search_count(state)
@@ -1232,6 +1446,13 @@ def main():
             )
 
             grabs += 1
+
+            if LIVE and TARGET_GRABS > 0:
+                print(
+                    "    UPGRADE GRABBED: %d / %d"
+                    % (grabs, TARGET_GRABS),
+                    flush=True
+                )
 
             mark_release_attempted(
                 state,
