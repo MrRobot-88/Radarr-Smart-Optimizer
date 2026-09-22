@@ -13,6 +13,7 @@ It is **dry-run by default**. The script never calls Radarr DELETE endpoints and
 - Newly added movies are appended to the end of the existing optimizer queue.
 - Optimizer-only movie exclusions can be stored in the shared control file; excluded movies are skipped before an interactive release search.
 - Storage-first replacement policy: a replacement must remain inside the configured minimum/maximum saving window.
+- Current movie files below **5 GiB** are skipped before an interactive release search.
 - No resolution downgrade.
 - AV1 candidates are rejected.
 - Dolby Vision-only candidates without HDR fallback are rejected.
@@ -22,7 +23,11 @@ It is **dry-run by default**. The script never calls Radarr DELETE endpoints and
 - Active Radarr queue items are skipped/rechecked before a live grab.
 - Search history, queue position and attempted releases are persisted.
 - At most two optimizer search cycles per movie, with a 180-day wait before the second cycle.
-- Manual UI mode can use `SMART_OPTIMIZER_TARGET_GRABS`: the requested number represents successful releases sent to Radarr, while the normal search budget remains the ceiling.
+- Manual UI mode can use `SMART_OPTIMIZER_TARGET_GRABS`: the requested number represents successful releases sent to Radarr.
+- `SMART_OPTIMIZER_MOVIE_ID` targets one movie directly without consuming the persistent A-Z queue.
+- `SMART_OPTIMIZER_MANUAL_TARGET=1` marks an explicit Manual Optimizer run so normal daily-search accounting is not consumed.
+- Optimizer-owned downloads can be bound to their Radarr queue item and safely recover from source-tier-only import rejection without globally weakening Radarr profiles.
+- Replacement completion is verified against Radarr's registered movie-file state before guarded cleanup of the exact recorded old file.
 
 **Radarr remains storage-first.** It does not use Sonarr's special low-resolution +50% size-growth rule.
 
@@ -69,7 +74,9 @@ In Radarr, the API key is under **Settings → General → Security → API Key*
 | `RADARR_MIN_SAVING_PERCENT` | `5` | Minimum required saving |
 | `RADARR_MAX_SAVING_PERCENT` | `50` | Maximum allowed saving / quality-risk guardrail |
 | `SMART_OPTIMIZER_CONTROL` | control JSON beside script | Optional shared runtime controls/exclusions |
-| `SMART_OPTIMIZER_TARGET_GRABS` | `0` | Manual/UI target; 0 keeps normal search-count behavior |
+| `SMART_OPTIMIZER_TARGET_GRABS` | `0` | Maximum successful grabs for targeted/manual UI runs |
+| `SMART_OPTIMIZER_MOVIE_ID` | unset | Target one Radarr movie directly |
+| `SMART_OPTIMIZER_MANUAL_TARGET` | `0` | Mark an explicit Manual Optimizer run so it does not consume normal daily-search accounting |
 
 The standalone script's base daily search budget is currently **300** searches. The shared control file can supply date-scoped temporary extra searches and override the min/max saving window.
 
